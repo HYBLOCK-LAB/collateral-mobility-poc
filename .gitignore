@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+/results/
+/tests/conformance/config.local.json
+/tests/conformance/config.*.local.json
+/implementations/*/logs/
+.env
+.env.*
