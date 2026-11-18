@@ -1,0 +1,10 @@
+{
+  "request_id": "request-reassignment-001",
+  "command_type": "REASSIGN_FOR_LENDING",
+  "bundle_id": "bundle-001",
+  "expected_version": 1,
+  "payload": {
+    "source_synchronizer": "S1",
+    "target_synchronizer": "S2"
+  }
+}

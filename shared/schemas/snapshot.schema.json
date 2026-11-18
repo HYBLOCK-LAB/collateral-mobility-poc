@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyblock.invalid/schemas/snapshot.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "platform": {
+          "enum": [
+            "X",
+            "Y",
+            "Z"
+          ]
+        },
+        "snapshot_seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bundles": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/bundle"
+          },
+          "minItems": 0
+        },
+        "rights": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/right"
+          },
+          "minItems": 0
+        },
+        "contracts": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/contract"
+          },
+          "minItems": 0
+        },
+        "obligations": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/obligation"
+          },
+          "minItems": 0
+        },
+        "margin_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/marginCall"
+          },
+          "minItems": 0
+        },
+        "allocations": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/allocation"
+          },
+          "minItems": 0
+        },
+        "pending_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/$defs/pendingOperation"
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "run_id",
+        "platform",
+        "snapshot_seq",
+        "bundles",
+        "rights",
+        "contracts",
+        "obligations",
+        "margin_calls",
+        "allocations",
+        "pending_operations"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "$ref": "result.schema.json#/$defs/errorResponse"
+    }
+  ]
+}

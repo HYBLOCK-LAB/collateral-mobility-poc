@@ -1,0 +1,16 @@
+{
+  "run_id": "run-001",
+  "request_id": "request-loan-001",
+  "actor": "BANK_B",
+  "command_type": "CONFIRM_LOAN",
+  "outcome": "COMMITTED",
+  "replayed": false,
+  "effect": {
+    "bundle_id": "bundle-001",
+    "version_before": 1,
+    "version_after": 2,
+    "record_type": "LOAN",
+    "record_id": "loan-001"
+  },
+  "error": null
+}

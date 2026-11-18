@@ -1,0 +1,9 @@
+{
+  "request_id": "request-loan-001",
+  "command_type": "CONFIRM_LOAN",
+  "expected_version": 1,
+  "payload": {
+    "agreement_id": "loan-agreement-001",
+    "loan_id": "loan-001"
+  }
+}

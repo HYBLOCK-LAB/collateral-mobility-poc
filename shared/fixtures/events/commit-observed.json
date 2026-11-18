@@ -1,0 +1,21 @@
+{
+  "event_id": "observer-event-012",
+  "event_type": "COMMIT_OBSERVED",
+  "model": "B1",
+  "test_id": "AC-01",
+  "run_id": "run-001",
+  "request_id": "request-loan-001",
+  "attempt_id": "attempt-loan-001",
+  "bundle_id": "bundle-001",
+  "record_id": "loan-001",
+  "platform": "Y",
+  "actor": "BANK_B",
+  "producer_id": "experiment-runner",
+  "clock_id": "runner-process-001",
+  "sequence": 12,
+  "mono_ns": "1250000000",
+  "outcome": "COMMITTED",
+  "error_code": null,
+  "version_before": 1,
+  "version_after": 2
+}

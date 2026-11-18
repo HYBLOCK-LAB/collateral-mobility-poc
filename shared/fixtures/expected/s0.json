@@ -1,0 +1,37 @@
+{
+  "expectation_id": "S0",
+  "bundle_id": "bundle-001",
+  "version": 0,
+  "rights": [
+    {
+      "right_id": "bundle-001:right:0",
+      "bundle_id": "bundle-001",
+      "holder": "BANK_A",
+      "created_version": 0,
+      "status": "AVAILABLE",
+      "allowed_commands": [
+        "CONFIRM_REPO"
+      ],
+      "predecessor_right_id": null,
+      "source_record_id": null
+    }
+  ],
+  "contracts": [],
+  "obligations": [],
+  "margin_calls": [
+    {
+      "margin_call_id": "margin-001",
+      "provider": "BANK_C",
+      "ccp": "CCP",
+      "bundle_id": "bundle-001",
+      "whole_bundle_accepted": true,
+      "eligibility_passed": true,
+      "status": "OPEN"
+    }
+  ],
+  "active_contract_ids": [],
+  "outstanding_obligation_ids": [],
+  "allocations": [],
+  "satisfied_margin_call_ids": [],
+  "pending_operation_count": 0
+}

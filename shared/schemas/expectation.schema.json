@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyblock.invalid/schemas/expectation.schema.json",
+  "type": "object",
+  "properties": {
+    "expectation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "bundle_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "rights": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/right"
+      },
+      "minItems": 0
+    },
+    "contracts": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/contract"
+      },
+      "minItems": 0
+    },
+    "obligations": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/obligation"
+      },
+      "minItems": 0
+    },
+    "margin_calls": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/marginCall"
+      },
+      "minItems": 0
+    },
+    "active_contract_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._:-]+$"
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "outstanding_obligation_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._:-]+$"
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "allocations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "allocation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "margin_call_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "status": {
+            "const": "LOCKED"
+          }
+        },
+        "required": [
+          "allocation_id",
+          "margin_call_id",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0
+    },
+    "satisfied_margin_call_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._:-]+$"
+      },
+      "minItems": 0,
+      "uniqueItems": true
+    },
+    "pending_operation_count": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "expectation_id",
+    "bundle_id",
+    "version",
+    "rights",
+    "contracts",
+    "obligations",
+    "margin_calls",
+    "active_contract_ids",
+    "outstanding_obligation_ids",
+    "allocations",
+    "satisfied_margin_call_ids",
+    "pending_operation_count"
+  ],
+  "additionalProperties": false
+}

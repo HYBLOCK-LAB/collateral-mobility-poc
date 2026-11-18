@@ -1,0 +1,91 @@
+{
+  "run_id": "run-001",
+  "platform": "Y",
+  "snapshot_seq": 1,
+  "bundles": [
+    {
+      "bundle_id": "bundle-001",
+      "security_id": "TEST-KTB-001",
+      "quantity": {
+        "value": "10000000000",
+        "unit": "KRW_FACE_VALUE"
+      },
+      "reference_value": {
+        "amount": "10000000000",
+        "currency": "KRW"
+      },
+      "version": 2
+    }
+  ],
+  "rights": [
+    {
+      "right_id": "bundle-001:right:1",
+      "bundle_id": "bundle-001",
+      "holder": "BANK_B",
+      "created_version": 1,
+      "status": "CONSUMED",
+      "allowed_commands": [],
+      "predecessor_right_id": "bundle-001:right:0",
+      "source_record_id": "repo-001"
+    },
+    {
+      "right_id": "bundle-001:right:2",
+      "bundle_id": "bundle-001",
+      "holder": "BANK_C",
+      "created_version": 2,
+      "status": "AVAILABLE",
+      "allowed_commands": [
+        "ALLOCATE_MARGIN"
+      ],
+      "predecessor_right_id": "bundle-001:right:1",
+      "source_record_id": "loan-001"
+    }
+  ],
+  "contracts": [
+    {
+      "contract_id": "loan-001",
+      "type": "LOAN",
+      "agreement_id": "loan-agreement-001",
+      "bundle_id": "bundle-001",
+      "parties": [
+        "BANK_B",
+        "BANK_C"
+      ],
+      "status": "ACTIVE"
+    }
+  ],
+  "obligations": [
+    {
+      "obligation_id": "loan-001:securities-return",
+      "type": "LOAN_SECURITIES_RETURN",
+      "debtor": "BANK_C",
+      "creditor": "BANK_B",
+      "contract_id": "loan-001",
+      "agreement_id": "loan-agreement-001",
+      "target": {
+        "security_id": "TEST-KTB-001",
+        "quantity": {
+          "value": "10000000000",
+          "unit": "KRW_FACE_VALUE"
+        }
+      },
+      "status": "OUTSTANDING"
+    },
+    {
+      "obligation_id": "loan-001:collateral-return",
+      "type": "LOAN_COLLATERAL_RETURN_OR_RELEASE",
+      "debtor": "BANK_B",
+      "creditor": "BANK_C",
+      "contract_id": "loan-001",
+      "agreement_id": "loan-agreement-001",
+      "target": {
+        "collateral_id": "separate-collateral-001",
+        "agreement_id": "loan-agreement-001"
+      },
+      "status": "OUTSTANDING"
+    }
+  ],
+  "margin_calls": [],
+  "allocations": [],
+  "pending_operations": []
+}

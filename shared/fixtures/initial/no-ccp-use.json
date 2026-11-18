@@ -1,0 +1,74 @@
+{
+  "fixture_id": "F-NO-CCP-USE",
+  "bundles": [
+    {
+      "bundle_id": "bundle-001",
+      "security_id": "TEST-KTB-001",
+      "quantity": {
+        "value": "10000000000",
+        "unit": "KRW_FACE_VALUE"
+      },
+      "reference_value": {
+        "amount": "10000000000",
+        "currency": "KRW"
+      },
+      "initial_holder": "BANK_A"
+    }
+  ],
+  "agreements": [
+    {
+      "agreement_id": "repo-agreement-001",
+      "type": "REPO",
+      "bundle_id": "bundle-001",
+      "seller": "BANK_A",
+      "buyer": "BANK_B",
+      "reuse_allowed": true
+    },
+    {
+      "agreement_id": "loan-agreement-001",
+      "type": "LOAN",
+      "bundle_id": "bundle-001",
+      "lender": "BANK_B",
+      "borrower": "BANK_C",
+      "ccp_use_allowed": false,
+      "collateral_condition": {
+        "collateral_id": "separate-collateral-001",
+        "conditions_met": true,
+        "provided": true
+      }
+    }
+  ],
+  "margin_calls": [
+    {
+      "margin_call_id": "margin-001",
+      "provider": "BANK_C",
+      "ccp": "CCP",
+      "bundle_id": "bundle-001",
+      "whole_bundle_accepted": true,
+      "eligibility_passed": true,
+      "status": "OPEN"
+    }
+  ],
+  "principals": [
+    {
+      "principal_id": "bank-a",
+      "actor": "BANK_A",
+      "observer": false
+    },
+    {
+      "principal_id": "bank-b",
+      "actor": "BANK_B",
+      "observer": false
+    },
+    {
+      "principal_id": "bank-c",
+      "actor": "BANK_C",
+      "observer": false
+    },
+    {
+      "principal_id": "experiment-observer",
+      "actor": null,
+      "observer": true
+    }
+  ]
+}

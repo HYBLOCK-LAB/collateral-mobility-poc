@@ -1,0 +1,13 @@
+{
+  "run_id": "run-001",
+  "request_id": "request-loan-001",
+  "actor": "BANK_B",
+  "command_type": "CONFIRM_LOAN",
+  "outcome": "REJECTED",
+  "replayed": false,
+  "effect": null,
+  "error": {
+    "code": "USE_NOT_PERMITTED",
+    "message": "Repo agreement does not permit reuse."
+  }
+}

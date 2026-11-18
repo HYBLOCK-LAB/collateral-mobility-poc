@@ -1,0 +1,623 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyblock.invalid/schemas/event.schema.json",
+  "type": "object",
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "event_type": {
+      "enum": [
+        "COMMAND_SUBMITTED",
+        "COMMIT_OBSERVED",
+        "REJECTION_OBSERVED",
+        "LOCAL_APPLIED",
+        "READY_OBSERVED",
+        "CALL_TIMEOUT",
+        "RESULT_CHECKED",
+        "COMMAND_RETRIED",
+        "FAULT_ACTIVATED",
+        "RESPONSE_HELD",
+        "FAULT_RELEASED",
+        "RECOVERY_COMPLETED",
+        "RUN_FINISHED",
+        "INTERNAL_COMMITTED",
+        "RIGHT_CREATED",
+        "RIGHT_CONSUMED",
+        "RIGHT_LOCKED",
+        "COMMAND_RECEIVED",
+        "COMMAND_FINISHED",
+        "MESSAGE_SENT",
+        "MESSAGE_RECEIVED",
+        "UNASSIGNMENT_STARTED",
+        "UNASSIGNMENT_COMPLETED",
+        "ASSIGNMENT_STARTED",
+        "ASSIGNMENT_COMPLETED",
+        "SOURCE_UNUSABLE",
+        "TARGET_USABLE"
+      ]
+    },
+    "model": {
+      "enum": [
+        "A",
+        "B1",
+        "B2"
+      ]
+    },
+    "test_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "attempt_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bundle_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "record_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "platform": {
+      "anyOf": [
+        {
+          "enum": [
+            "X",
+            "Y",
+            "Z"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "actor": {
+      "anyOf": [
+        {
+          "enum": [
+            "BANK_A",
+            "BANK_B",
+            "BANK_C",
+            "CCP"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "producer_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "clock_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "mono_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "outcome": {
+      "anyOf": [
+        {
+          "enum": [
+            "COMMITTED",
+            "REJECTED",
+            "PENDING",
+            "UNKNOWN"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "enum": [
+            "INVALID_REQUEST",
+            "UNAUTHENTICATED",
+            "FORBIDDEN",
+            "NOT_FOUND",
+            "PRECONDITION_NOT_MET",
+            "REQUEST_ID_CONFLICT",
+            "VERSION_CONFLICT",
+            "USE_NOT_PERMITTED",
+            "RIGHT_UNAVAILABLE",
+            "COLLATERAL_NOT_ELIGIBLE",
+            "TEMPORARILY_UNAVAILABLE",
+            "OUTCOME_UNKNOWN",
+            "INTERNAL_ERROR"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "version_before": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "version_after": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "command_type": {
+      "enum": [
+        "CONFIRM_REPO",
+        "CONFIRM_LOAN",
+        "ALLOCATE_MARGIN",
+        "REASSIGN_FOR_LENDING"
+      ]
+    },
+    "utc_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "right_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "predecessor_right_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_record_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "holder": {
+      "enum": [
+        "BANK_A",
+        "BANK_B",
+        "BANK_C",
+        "CCP"
+      ]
+    },
+    "right_status": {
+      "enum": [
+        "AVAILABLE",
+        "CONSUMED",
+        "LOCKED"
+      ]
+    },
+    "contract_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "reassignment_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "source_synchronizer": {
+      "const": "S1"
+    },
+    "target_synchronizer": {
+      "const": "S2"
+    },
+    "observation": {
+      "type": "object",
+      "properties": {
+        "clock_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "mono_ns": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        }
+      },
+      "required": [
+        "clock_id",
+        "mono_ns"
+      ],
+      "additionalProperties": false
+    },
+    "message_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "message_kind": {
+      "enum": [
+        "REQUEST",
+        "RESPONSE",
+        "EVENT"
+      ]
+    },
+    "message_category": {
+      "enum": [
+        "BUSINESS_INTEGRATION",
+        "HARNESS",
+        "PROTOCOL",
+        "OPERATIONAL"
+      ]
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "destination_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "verdict": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "INCONCLUSIVE",
+        "NOT_RUN",
+        "NOT_APPLICABLE"
+      ]
+    },
+    "config_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "fixture_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "code_version": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "event_id",
+    "event_type",
+    "model",
+    "test_id",
+    "run_id",
+    "request_id",
+    "attempt_id",
+    "bundle_id",
+    "record_id",
+    "platform",
+    "actor",
+    "producer_id",
+    "clock_id",
+    "sequence",
+    "mono_ns",
+    "outcome",
+    "error_code",
+    "version_before",
+    "version_after"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "COMMAND_SUBMITTED",
+              "COMMAND_RETRIED",
+              "COMMAND_RECEIVED",
+              "COMMAND_FINISHED",
+              "COMMIT_OBSERVED",
+              "REJECTION_OBSERVED",
+              "CALL_TIMEOUT",
+              "RESULT_CHECKED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "request_id",
+          "attempt_id",
+          "bundle_id",
+          "platform",
+          "actor"
+        ],
+        "properties": {
+          "request_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "attempt_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "bundle_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "platform": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "actor": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "RIGHT_CREATED",
+              "RIGHT_CONSUMED",
+              "RIGHT_LOCKED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "right_id",
+          "bundle_id",
+          "right_status",
+          "holder"
+        ],
+        "properties": {
+          "right_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "bundle_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "right_status": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "holder": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "UNASSIGNMENT_STARTED",
+              "UNASSIGNMENT_COMPLETED",
+              "ASSIGNMENT_STARTED",
+              "ASSIGNMENT_COMPLETED",
+              "SOURCE_UNUSABLE",
+              "TARGET_USABLE"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "contract_id",
+          "reassignment_id",
+          "source_synchronizer",
+          "target_synchronizer",
+          "bundle_id"
+        ],
+        "properties": {
+          "contract_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "reassignment_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "source_synchronizer": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "target_synchronizer": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "bundle_id": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "MESSAGE_SENT",
+              "MESSAGE_RECEIVED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "message_id",
+          "message_kind",
+          "message_category",
+          "source_id",
+          "destination_id"
+        ],
+        "properties": {
+          "message_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "message_kind": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "message_category": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "source_id": {
+            "not": {
+              "type": "null"
+            }
+          },
+          "destination_id": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event_type": {
+            "enum": [
+              "RUN_FINISHED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "verdict"
+        ],
+        "properties": {
+          "verdict": {
+            "not": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

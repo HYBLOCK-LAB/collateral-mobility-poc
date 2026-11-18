@@ -1,0 +1,10 @@
+{
+  "request_id": "request-margin-001",
+  "command_type": "ALLOCATE_MARGIN",
+  "bundle_id": "bundle-001",
+  "expected_version": 2,
+  "payload": {
+    "margin_call_id": "margin-001",
+    "allocation_id": "allocation-001"
+  }
+}

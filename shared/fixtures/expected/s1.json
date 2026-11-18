@@ -1,0 +1,93 @@
+{
+  "expectation_id": "S1",
+  "bundle_id": "bundle-001",
+  "version": 1,
+  "rights": [
+    {
+      "right_id": "bundle-001:right:0",
+      "bundle_id": "bundle-001",
+      "holder": "BANK_A",
+      "created_version": 0,
+      "status": "CONSUMED",
+      "allowed_commands": [],
+      "predecessor_right_id": null,
+      "source_record_id": null
+    },
+    {
+      "right_id": "bundle-001:right:1",
+      "bundle_id": "bundle-001",
+      "holder": "BANK_B",
+      "created_version": 1,
+      "status": "AVAILABLE",
+      "allowed_commands": [
+        "CONFIRM_LOAN"
+      ],
+      "predecessor_right_id": "bundle-001:right:0",
+      "source_record_id": "repo-001"
+    }
+  ],
+  "contracts": [
+    {
+      "contract_id": "repo-001",
+      "type": "REPO",
+      "agreement_id": "repo-agreement-001",
+      "bundle_id": "bundle-001",
+      "parties": [
+        "BANK_A",
+        "BANK_B"
+      ],
+      "status": "ACTIVE"
+    }
+  ],
+  "obligations": [
+    {
+      "obligation_id": "repo-001:repurchase-payment",
+      "type": "REPO_REPURCHASE_PAYMENT",
+      "debtor": "BANK_A",
+      "creditor": "BANK_B",
+      "contract_id": "repo-001",
+      "agreement_id": "repo-agreement-001",
+      "target": {
+        "agreement_id": "repo-agreement-001"
+      },
+      "status": "OUTSTANDING"
+    },
+    {
+      "obligation_id": "repo-001:securities-return",
+      "type": "REPO_SECURITIES_RETURN",
+      "debtor": "BANK_B",
+      "creditor": "BANK_A",
+      "contract_id": "repo-001",
+      "agreement_id": "repo-agreement-001",
+      "target": {
+        "security_id": "TEST-KTB-001",
+        "quantity": {
+          "value": "10000000000",
+          "unit": "KRW_FACE_VALUE"
+        }
+      },
+      "status": "OUTSTANDING"
+    }
+  ],
+  "margin_calls": [
+    {
+      "margin_call_id": "margin-001",
+      "provider": "BANK_C",
+      "ccp": "CCP",
+      "bundle_id": "bundle-001",
+      "whole_bundle_accepted": true,
+      "eligibility_passed": true,
+      "status": "OPEN"
+    }
+  ],
+  "active_contract_ids": [
+    "repo-001"
+  ],
+  "outstanding_obligation_ids": [
+    "repo-001:repurchase-payment",
+    "repo-001:securities-return"
+  ],
+  "allocations": [],
+  "satisfied_margin_call_ids": [],
+  "pending_operation_count": 0
+}

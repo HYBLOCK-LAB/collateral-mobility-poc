@@ -1,0 +1,8 @@
+{
+  "run_id": "run-001",
+  "request_id": "request-loan-001",
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "The authenticated principal cannot perform this operation."
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyblock.invalid/schemas/readiness.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "platform": {
+          "enum": [
+            "Y",
+            "Z"
+          ]
+        },
+        "bundle_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "command_type": {
+          "enum": [
+            "CONFIRM_LOAN",
+            "ALLOCATE_MARGIN"
+          ]
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "observed_version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blocking_reasons": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "PRECONDITION_NOT_MET",
+              "USE_NOT_PERMITTED",
+              "RIGHT_UNAVAILABLE",
+              "COLLATERAL_NOT_ELIGIBLE"
+            ]
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "run_id",
+        "platform",
+        "bundle_id",
+        "command_type",
+        "ready",
+        "observed_version",
+        "blocking_reasons"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ready": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "observed_version": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "blocking_reasons": {
+                "const": []
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "blocking_reasons": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "platform": {
+                "const": "Y"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "command_type": {
+                "const": "CONFIRM_LOAN"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "command_type": {
+                "const": "ALLOCATE_MARGIN"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "$ref": "result.schema.json#/$defs/errorResponse"
+    }
+  ]
+}

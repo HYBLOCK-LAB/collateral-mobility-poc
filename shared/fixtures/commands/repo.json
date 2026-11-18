@@ -1,0 +1,10 @@
+{
+  "request_id": "request-repo-001",
+  "command_type": "CONFIRM_REPO",
+  "bundle_id": "bundle-001",
+  "expected_version": 0,
+  "payload": {
+    "agreement_id": "repo-agreement-001",
+    "repo_id": "repo-001"
+  }
+}

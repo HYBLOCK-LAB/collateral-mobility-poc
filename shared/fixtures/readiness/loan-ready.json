@@ -1,0 +1,9 @@
+{
+  "run_id": "run-001",
+  "platform": "Y",
+  "bundle_id": "bundle-001",
+  "command_type": "CONFIRM_LOAN",
+  "ready": true,
+  "observed_version": 1,
+  "blocking_reasons": []
+}

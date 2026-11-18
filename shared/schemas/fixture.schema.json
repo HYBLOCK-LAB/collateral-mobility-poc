@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hyblock.invalid/schemas/fixture.schema.json",
+  "type": "object",
+  "properties": {
+    "fixture_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "bundle_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "security_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "quantity": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+              },
+              "unit": {
+                "const": "KRW_FACE_VALUE"
+              }
+            },
+            "required": [
+              "value",
+              "unit"
+            ],
+            "additionalProperties": false
+          },
+          "reference_value": {
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]*)$"
+              },
+              "currency": {
+                "const": "KRW"
+              }
+            },
+            "required": [
+              "amount",
+              "currency"
+            ],
+            "additionalProperties": false
+          },
+          "initial_holder": {
+            "const": "BANK_A"
+          }
+        },
+        "required": [
+          "bundle_id",
+          "security_id",
+          "quantity",
+          "reference_value",
+          "initial_holder"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "agreements": {
+      "type": "array",
+      "items": {
+        "$ref": "common.schema.json#/$defs/agreement"
+      },
+      "minItems": 2
+    },
+    "margin_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "margin_call_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "provider": {
+            "const": "BANK_C"
+          },
+          "ccp": {
+            "const": "CCP"
+          },
+          "bundle_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "whole_bundle_accepted": {
+            "type": "boolean"
+          },
+          "eligibility_passed": {
+            "type": "boolean"
+          },
+          "status": {
+            "const": "OPEN"
+          }
+        },
+        "required": [
+          "margin_call_id",
+          "provider",
+          "ccp",
+          "bundle_id",
+          "whole_bundle_accepted",
+          "eligibility_passed",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "principals": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "principal_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "actor": {
+                "enum": [
+                  "BANK_A",
+                  "BANK_B",
+                  "BANK_C",
+                  "CCP"
+                ]
+              },
+              "observer": {
+                "const": false
+              }
+            },
+            "required": [
+              "principal_id",
+              "actor",
+              "observer"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "principal_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "actor": {
+                "type": "null"
+              },
+              "observer": {
+                "const": true
+              }
+            },
+            "required": [
+              "principal_id",
+              "actor",
+              "observer"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "minItems": 4
+    }
+  },
+  "required": [
+    "fixture_id",
+    "bundles",
+    "agreements",
+    "margin_calls",
+    "principals"
+  ],
+  "additionalProperties": false
+}

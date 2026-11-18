@@ -1,0 +1,13 @@
+{
+  "run_id": "run-001",
+  "request_id": "request-loan-001",
+  "actor": "BANK_B",
+  "command_type": "CONFIRM_LOAN",
+  "outcome": "UNKNOWN",
+  "replayed": false,
+  "effect": null,
+  "error": {
+    "code": "OUTCOME_UNKNOWN",
+    "message": "The original result has not been confirmed."
+  }
+}
