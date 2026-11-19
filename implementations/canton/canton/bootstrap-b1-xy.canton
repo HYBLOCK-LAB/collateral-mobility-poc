@@ -1,0 +1,85 @@
+// Bootstrap for b1-xy.conf. Safe to rerun against persisted nodes: each step
+// checks the current state before changing it.
+//
+// Institutions and hosting (stages 1-3):
+//   BANK_A  P_X              platform X only
+//   BANK_B  P_X and P_Y      takes part in X and Y; submission rights on both
+//   BANK_C  P_Y              platform Y (P_Z is added in stage 4)
+//
+// Writes $CANTON_STATE_DIR/ids.json (synchronizer, participant and party ids)
+// and then $CANTON_STATE_DIR/canton.ready, which scripts/canton.sh waits for.
+
+import java.nio.file.{Files, Paths, StandardCopyOption}
+import com.digitalasset.canton.console.{LocalParticipantReference, ParticipantReference}
+
+console.set_command_timeout(2.minutes)
+nodes.local.foreach(_.health.wait_for_running())
+
+val s1Alias = "s1"
+if (!s1_sequencer.health.initialized()) {
+  bootstrap.synchronizer(
+    s1Alias,
+    sequencers = Seq(s1_sequencer),
+    mediators = Seq(s1_mediator),
+    synchronizerOwners = Seq(s1_sequencer),
+    synchronizerThreshold = PositiveInt.one,
+    staticSynchronizerParameters = StaticSynchronizerParameters.defaults(ProtocolVersion.forSynchronizer),
+  )
+}
+
+Seq(p_x, p_y).foreach { p =>
+  val registered = p.synchronizers.list_registered().exists(_._1.synchronizerAlias.unwrap == s1Alias)
+  if (!registered) p.synchronizers.connect_local(s1_sequencer, alias = s1Alias)
+  else p.synchronizers.reconnect_all()
+}
+val s1Id = p_x.synchronizers.id_of(s1Alias)
+
+def ensureParty(p: ParticipantReference, name: String): PartyId =
+  p.parties.hosted(filterParty = name + "::").headOption.map(_.party).getOrElse(p.parties.enable(name))
+
+val bankA = ensureParty(p_x, "BANK_A")
+val bankB = ensureParty(p_x, "BANK_B")
+val bankC = ensureParty(p_y, "BANK_C")
+
+// BANK_B is created on P_X and additionally hosted on P_Y. Both participants
+// must sign the mapping. This only works while BANK_B has no contracts.
+val bankBHosting = Set(bankB -> p_x.id, bankB -> p_y.id)
+if (!p_y.topology.party_to_participant_mappings.are_known(s1Id, bankBHosting)) {
+  Seq(p_x, p_y).foreach(
+    _.topology.party_to_participant_mappings.propose_delta(
+      bankB,
+      adds = List((p_y.id, ParticipantPermission.Submission)),
+      store = s1Id,
+    )
+  )
+}
+utils.retry_until_true {
+  Seq(p_x, p_y).forall(_.topology.party_to_participant_mappings.are_known(s1Id, bankBHosting))
+}
+
+p_x.health.ping(p_y)
+
+val stateDir = Paths.get(sys.env("CANTON_STATE_DIR"))
+// JSON Ledger API addresses come from b1-xy.conf, so the ports live in one place.
+def jsonApi(p: LocalParticipantReference): String = {
+  val http = p.config.httpLedgerApi
+  s"http://${http.address}:${http.port.unwrap}"
+}
+val ids =
+  s"""{
+     |  "topology": "b1-xy",
+     |  "synchronizers": {"S1": "${s1Id.toProtoPrimitive}"},
+     |  "participants": {"P_X": "${p_x.id.toProtoPrimitive}", "P_Y": "${p_y.id.toProtoPrimitive}"},
+     |  "parties": {
+     |    "BANK_A": "${bankA.toProtoPrimitive}",
+     |    "BANK_B": "${bankB.toProtoPrimitive}",
+     |    "BANK_C": "${bankC.toProtoPrimitive}"
+     |  },
+     |  "json_api": {"P_X": "${jsonApi(p_x)}", "P_Y": "${jsonApi(p_y)}"}
+     |}
+     |""".stripMargin
+val tmp = stateDir.resolve("ids.json.tmp")
+Files.writeString(tmp, ids)
+Files.move(tmp, stateDir.resolve("ids.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+Files.writeString(stateDir.resolve("canton.ready"), java.time.Instant.now().toString + "\n")
+println("CANTON_B1_XY_READY")

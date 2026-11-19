@@ -1,0 +1,11 @@
+# Stage 1 check package: visibility, submission rights and contention across
+# P_X and P_Y. Not a business model; selftest/stage1_probe.py uses it.
+sdk-version: 3.7.1
+name: stage1-probe
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --target=2.1
