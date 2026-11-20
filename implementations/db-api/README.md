@@ -1,72 +1,85 @@
-# Model A — DB/API 구현
+# Model A — DB/API
 
-담당: **연수인**. 이 문서는 A의 기술 스택·로컬 구성·실행·자체 검증을 기록하는 곳입니다. 공통 업무·판정 규칙은 [루트 안내](../../README.md), [AGENTS.md](../../AGENTS.md), [spec](../../spec/), [shared](../../shared/README.md)를 따릅니다.
+담당: **연수인**. 현재 단계는 X(Repo)·Y(증권대차)의 환경과 기본 DB 연결이다. 실제 거래·권리 전이·Z는 후속 단계에 해당한다. 공통 기준은 [루트 안내](../../README.md), [AGENTS.md](../../AGENTS.md), [업무·인터페이스 명세](../../spec/), [공통 데이터 계약](../../shared/README.md)을 따른다.
 
-**현재 상태:** 구현 전입니다. 기술 스택·버전·실행 명령은 아직 정하지 않았습니다. 아래의 미정 항목을 실제 구현에 맞게 채우며, 실행하지 않은 방법을 검증된 절차로 적지 않습니다.
+## 기술 스택과 구성
 
-## 1. 완성할 범위
+| 항목 | 버전 및 구성 |
+|---|---|
+| 런타임 | Docker 이미지 `python:3.12-slim` |
+| API | FastAPI 0.135.1, Uvicorn 0.41.0 |
+| DB 및 드라이버 | Docker 이미지 `postgres:17`, SQLAlchemy 2.0.48, psycopg 3.3.3 |
+| 실행 도구 | Docker Compose v2. Windows 검증 환경의 CLI는 v2.29.1-desktop.1 |
 
-- 독립 업무 플랫폼 X·Y·Z와 각자의 DB. 로컬 구성으로 시작하며 제품·프로세스 구성은 아래에 기록합니다.
-- X Repo → Y 증권대차 → Z CCP 배정·잠금의 실제 업무 처리, 권한·멱등성·경합·복구.
-- 공통 HTTP 명령·결과 조회·Y/Z readiness·관측용 snapshot과 공통 로그.
-- 공통 fixture로 새 run_id의 초기 자산·합의·자격 연결을 준비하는 방법.
-- 자체 테스트, 공통 실행기 연결, 재현 가능한 기동·종료·로그 확인 방법.
+Python과 PostgreSQL 이미지 태그는 마이너·패치 업데이트를 허용한다. 실제 실험 환경을 기록할 때는 컨테이너에서 확인한 런타임 버전과 이미지 식별자를 사용한다.
 
-각 플랫폼은 자기 DB를 직접 사용하고 다른 플랫폼의 권리는 API·이벤트 등 정상 연계로 확인합니다. 플랫폼 간 DB 직접 접근으로 검증을 우회하거나 중앙 DB 하나에서 전체 권리를 결정하지 않습니다.
+| 플랫폼 | API | DB 서비스와 DB 이름 | 전용 네트워크와 볼륨 |
+|---|---|---|---|
+| X | `http://127.0.0.1:8101` | `db-x` / `model_a_x` | `x` / `x-data` |
+| Y | `http://127.0.0.1:8102` | `db-y` / `model_a_y` | `y` / `y-data` |
 
-단순 조회 뒤 로컬 상태만 바꿔 권리를 중복 사용할 수 있게 만들지 않습니다. 정상적인 권리 확보·소진·복구를 구현하되, 구체적인 잠금·예약·트랜잭션 방식은 공통 규칙 안에서 정합니다. 의도적으로 비효율적인 대조군을 만들지 않습니다.
+두 API는 같은 Dockerfile에서 빌드하며, 각 프로세스는 자기 DB의 전용 네트워크와 계정으로 연결한다. API 포트는 로컬 호스트에 바인딩하고 DB 포트는 Compose 네트워크 안에서만 사용한다. `GET /health/db`는 DB에서 직접 SQL을 실행해 DB 이름과 접속 사용자를 확인한 뒤 플랫폼, DB 이름, DB 서버 버전을 반환한다. 연결이나 DB 식별 확인에 실패하면 HTTP 503을 반환한다.
 
-## 2. 단계별 개발
+## 환경 변수와 실행 방법
 
-1. 스택·DB·플랫폼 주소·자격 설정·데이터 준비 방식을 정하고 최소 실행을 확인합니다.
-2. X·Y만 구현해 S0→S1→S2와 관련 거부·중복·경합·조회·로그를 검증합니다.
-3. 총괄 검토와 사용자 승인 후 X→Y 기준 커밋을 보존합니다. 이 확인 전에는 Z를 구현하지 않습니다.
-4. Z를 추가하며 기존 X·Y 변경 이유·인터페이스·메시지·예외 경로를 기록합니다.
-5. AC-01~11과 회귀 검증을 수행하고 총괄이 통합 실험을 재현할 환경을 전달합니다.
+Windows PowerShell에서 Docker Desktop의 Linux 엔진이 정상 응답하는지 확인한다. 저장소 루트에서 다음을 실행한다.
 
-공통 실행기가 아직 없으면 자체 실제 기능 확인을 수행하고 공통 검증은 NOT_RUN으로 보고합니다. 사용할 수 없는 실행 명령을 임의로 만들어 적지 않습니다.
+```powershell
+Set-Location implementations/db-api
+docker version --format '{{.Server.Version}}'
+docker compose version
+Copy-Item env.example .env
+```
 
-## 3. 기술 스택·구성 — 구현 시 작성
+`Copy-Item`은 최초 설정 때 실행한다. `.env`의 `POSTGRES_X_PASSWORD`, `POSTGRES_Y_PASSWORD`에 각각 다른 로컬 비밀번호를 설정한다. `.env`는 Git에서 제외한다. Compose는 해당 값을 각 DB의 `POSTGRES_PASSWORD`와 연결 API의 `DB_PASSWORD`에 전달한다. `PLATFORM`, `DB_HOST`, `DB_NAME`, `DB_USER`, `POSTGRES_DB`, `POSTGRES_USER`는 Compose 서비스별로 설정한다.
 
-| 항목 | 선택·버전 | 근거·기록할 내용 |
-|---|---|---|
-| 언어·런타임 | 미정 | 버전·설치 방법 |
-| API 프레임워크 | 미정 | 최소 구성과 실행 방법 |
-| DB | 미정 | 제품·버전·X/Y/Z 격리·저장 위치·내구성 |
-| 플랫폼 간 연계 | 미정 | API/이벤트·권위 있는 상태 확인·정합성 책임 |
-| 권한·자격 연결 | 미정 | 로컬 principal 연결 방법. 비밀값 제외 |
-| 멱등성·경합·복구 | 미정 | 요청 기록·권리 소진·결과 미확정 처리 |
-| 테스트 도구 | 미정 | 자체 테스트와 공통 실행기 연결 |
+```powershell
+docker compose config --quiet
+docker compose up --build --wait --wait-timeout 120
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:8101/health/db
+Invoke-RestMethod http://127.0.0.1:8102/health/db
+```
 
-초기 데이터 적재 코드와 공통 실행기의 자동 준비 연결은 **이서진 연구 총괄이 이 구현 폴더에서 작성**합니다. 구현 담당자는 DB 구조 또는 실제 계약 생성·Party·권한·Synchronizer 연결 방법과 필요한 설정을 제공하고 변경 시 알립니다. 아래 데이터 준비 항목은 총괄이 만든 기능의 실제 사용법을 함께 기록합니다. 초기 상태는 공통 fixture와 같아야 하며 사용 중인 run_id를 덮어쓰지 않습니다.
+기대 결과는 두 요청 모두 HTTP 200과 `status=ok`를 반환하고, 각 응답의 `platform`과 `database`가 각각 `X`/`model_a_x`, `Y`/`model_a_y`인 것이다. `postgresql_version`은 `17.`로 시작한다.
 
-## 4. 재현 절차 — 실제 명령 확인 후 작성
+```powershell
+docker compose logs --tail 100 api-x api-y db-x db-y
+docker compose down
+```
 
-다른 사람이 이 절차만으로 새 실험 실행을 준비할 수 있게 작성합니다.
+`down`은 DB 볼륨을 보존한다. PostgreSQL 이미지의 초기 비밀번호 설정은 빈 볼륨을 초기화할 때 적용된다. 기존 볼륨을 재사용할 때는 기존 DB 자격 설정을 사용한다.
 
-| 순서 | 반드시 기록할 내용 | 현재 상태 |
-|---|---|---|
-| 설치 | 사전 준비·의존성·버전·환경 설정 | 미정 |
-| DB 준비 | X/Y/Z 생성·격리·저장·기동 방법 | 미정 |
-| 서비스 기동 | 플랫폼별 주소·포트·준비 완료 확인 | 미정 |
-| 자격 설정 | 기관·관측기와 설정의 연결. 실제 비밀값 제외 | 미정 |
-| 새 데이터 준비 | 새 run_id와 fixture 경로를 입력하는 정확한 명령 | 미정 |
-| 기능 확인 | Repo·증권대차·배정·readiness·결과 조회·snapshot 확인 방법 | 미정 |
-| 자체 테스트 | 실제 테스트 명령과 통과/실패 조건 | 미정 |
-| 공통 테스트 | 총괄 제공 실행기의 연결 설정·실행 결과 | 실행기 준비 후 작성 |
-| 로그 확인 | 로그 경로·시계 ID·업무/호출 ID 연결 | 미정 |
-| 종료·정리 | 서비스 종료·테스트 데이터 정리·주의사항 | 미정 |
+## 1단계 검증 결과
 
-새 실행 준비는 기존 진행 중인 run_id를 덮어쓰지 않습니다. 데이터 삭제·스키마 재생성 명령이 필요하면 영향과 사용 조건을 명확히 구분합니다.
+2026-11-21, Windows의 Docker Desktop·WSL2 환경에서 확인했다. Docker Server는 27.1.1, Compose CLI는 v2.29.1-desktop.1, X API 컨테이너의 Python은 3.12.16이다.
 
-## 5. 검증 결과·인계 — 개발 중 갱신
+| 항목 | 결과 |
+|---|---|
+| `docker compose config --quiet` | PASS |
+| Python 3.12.2에서 `app.py` 구문 파싱 | PASS |
+| 최초 이미지 빌드·컨테이너 기동 | PASS. 담당자가 `docker compose up -d --build`를 실행해 최초 이미지 빌드와 컨테이너 기동을 확인했다. 이후 `docker inspect`에서 API·PostgreSQL 컨테이너 4개가 모두 healthy임을 확인했다. |
+| X `GET /health/db` | PASS. HTTP 200, `status=ok`, `platform=X`, `database=model_a_x`, PostgreSQL 17.12 |
+| Y `GET /health/db` | PASS. HTTP 200, `status=ok`, `platform=Y`, `database=model_a_y`, PostgreSQL 17.12 |
+| 네트워크·볼륨·포트 격리 | PASS. `docker inspect`에서 X 쌍은 `db-api_x`, Y 쌍은 `db-api_y`에만 연결됐다. DB 볼륨은 각각 `db-api_x-data`, `db-api_y-data`였고 두 DB의 5432 포트는 호스트에 게시되지 않았다. API는 각각 루프백의 8101·8102에 게시됐다. |
+| DB 접근 격리 | PASS. `docker exec`로 각 API 안에서 TCP 5432를 검사했다. 자기 DB 서비스는 연결됐다. 상대 DB는 서비스 이름 조회에 실패했고, `docker inspect`에서 얻은 컨테이너 IP로 직접 연결을 시도했을 때도 양방향 모두 타임아웃됐다. |
+| Git 자격 정보 확인 | PASS. `.env`와 `.env.*`는 Git 제외 대상이고 인덱스에 없다. `env.example`의 두 값은 비어 있으며, 로컬 `.env`의 두 비밀번호 값은 환경 PR 후보 7개 파일에 없다. |
+| 공통 인수 테스트 | NOT_RUN. 금융 거래와 연구 총괄의 초기 적재 프로그램·실행기 연결이 후속 단계에 해당한다. |
 
-- 현재 단계·구현한 기능·코드 기준:
-- X→Y 기준 버전과 확인한 테스트:
-- Z 추가 변경 목록·사유·메시지·예외 경로:
-- 자체 및 공통 테스트의 테스트 ID·run_id·PASS/FAIL/NOT_RUN·로그:
-- 응답 지연 후 원래 결과 확인·안전한 재전송의 재현 방법:
-- 알려진 제약·명세 충돌·아직 검증하지 않은 항목:
-- 총괄이 재현할 때 필요한 환경·설정·남은 조치:
+이전 자동 실행에서는 Docker 파이프 접근 오류와 HTTP 500이 발생했다. 이번에는 담당자가 기동한 환경에서 HTTP 점검과 권한 승인 후 Docker 런타임 검사를 수행했다.
 
-완료 기준은 [acceptance.md](../../spec/acceptance.md)를 따릅니다. A의 AC-01~11 필수 변형·반복을 공통 실행기로 모두 PASS하고 증빙을 갖춰야 최종 개발 완료로 제출·인계할 수 있습니다. 필수 항목의 FAIL·INCONCLUSIVE·NOT_RUN·증거 누락은 인계 불가이며, 실행기 미준비나 자체 테스트만 수행한 상태도 최종 완료가 아닙니다. 공통 명세·기대 결과를 바꾸어 통과시키지 않습니다. 커밋·푸시는 실행 전에 사용자에게 확인받습니다.
+## 환경 PR 범위
+
+| 파일 | 내용 |
+|---|---|
+| `compose.yaml` | X·Y API와 PostgreSQL 서비스, 전용 네트워크·볼륨, healthcheck |
+| `Dockerfile`, `.dockerignore`, `requirements.txt` | Python 이미지 빌드, 빌드 컨텍스트 제한, Python 의존성 버전 |
+| `app.py` | 플랫폼별 SQL 연결과 DB health API |
+| `env.example` | 비밀번호 변수 이름과 빈 값 |
+| `README.md` | 기동·종료 절차와 검증 결과 |
+
+거래 기능, 초기 데이터 적재 프로그램 및 공통 인수 테스트는 아래 후속 단계에서 진행한다.
+
+## 이후 단계와 인계
+
+초기 데이터 적재 프로그램은 연구 총괄이 작성한다. Model A 담당자는 플랫폼별 DB 구조와 권한, 기동·로그 수집 방법을 제공한다. 이후 X→Y에서 공통 API, readiness, snapshot, 결과 조회, 권리·의무·멱등성·경합·복구와 공통 이벤트를 검증한다. 총괄 검토와 사용자 승인에 따른 X→Y 기준 버전 보존을 마친 뒤 Z를 추가한다. 최종 인계에는 [공통 실행기](../../tests/conformance/README.md)의 AC-01~11 필수 변형·반복·증빙 통과가 필요하다.

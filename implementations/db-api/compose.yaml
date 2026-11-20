@@ -1,0 +1,74 @@
+x-api: &api
+  build: .
+  healthcheck:
+    test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/db', timeout=3).close()"]
+    interval: 5s
+    timeout: 4s
+    retries: 12
+
+x-db: &db
+  image: postgres:17
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+
+services:
+  api-x:
+    <<: *api
+    environment:
+      PLATFORM: X
+      DB_HOST: db-x
+      DB_NAME: model_a_x
+      DB_USER: model_a_x
+      DB_PASSWORD: "${POSTGRES_X_PASSWORD:?Set POSTGRES_X_PASSWORD}"
+    ports:
+      - "127.0.0.1:8101:8000"
+    networks: [x]
+    depends_on:
+      db-x:
+        condition: service_healthy
+
+  api-y:
+    <<: *api
+    environment:
+      PLATFORM: Y
+      DB_HOST: db-y
+      DB_NAME: model_a_y
+      DB_USER: model_a_y
+      DB_PASSWORD: "${POSTGRES_Y_PASSWORD:?Set POSTGRES_Y_PASSWORD}"
+    ports:
+      - "127.0.0.1:8102:8000"
+    networks: [y]
+    depends_on:
+      db-y:
+        condition: service_healthy
+
+  db-x:
+    <<: *db
+    environment:
+      POSTGRES_DB: model_a_x
+      POSTGRES_USER: model_a_x
+      POSTGRES_PASSWORD: "${POSTGRES_X_PASSWORD:?Set POSTGRES_X_PASSWORD}"
+    networks: [x]
+    volumes:
+      - x-data:/var/lib/postgresql/data
+
+  db-y:
+    <<: *db
+    environment:
+      POSTGRES_DB: model_a_y
+      POSTGRES_USER: model_a_y
+      POSTGRES_PASSWORD: "${POSTGRES_Y_PASSWORD:?Set POSTGRES_Y_PASSWORD}"
+    networks: [y]
+    volumes:
+      - y-data:/var/lib/postgresql/data
+
+networks:
+  x:
+  y:
+
+volumes:
+  x-data:
+  y-data:
