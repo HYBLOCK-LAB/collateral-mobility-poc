@@ -381,3 +381,130 @@ B2 실행에는 A/B1의 실제 최종 검증 배치와 T1 계측 배치를 모�
 자체 시험은 모의 대상을 사용하며 실제 A/B 통과·금융 업무·연구 성능 결과가 아니다. `test_runner`는 준비, `test_execution`은 모든 X/Y/Z 변형, `test_relay`는 실제 로컬 소켓 타임아웃, `test_history`는 권리/인과/경합/증거 훼손, `test_batch`는 준비-업무 연결·고정 일정·모델 교대, `test_report`는 계산·재생성과 원본 불변, `test_reassignment`는 B2 계약·시간·호출 증거를 검사한다.
 
 실제 연결 시 우선 확인할 것은 준비 프로그램의 DB/계약 적재, 인증 방식, 로그의 원본 정합성·flush·attempt 연결, 모델 환경·기준 커밋·Z 변경 기록, B2 실제 버전과 원본 이벤트 수집이다. 공통 spec/Schema/fixture와 모델 구현은 이번 후속 작업에서 변경하지 않았다. 최종 인계는 실제 필수 증거가 채워진 이후에만 가능하다.
+
+## 15. B1 1단계 연결 준비 — 2026-11-19
+
+검토 기준은 [PR #2](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/2)의 `69e21d9824b40d98829a53521a3523d19a576919`다. 검토 시 PR은 미병합이며, 환경·기본 연결과 어댑터 골격만 제공한다. 실제 업무·초기 적재·snapshot 연결과 공통 테스트는 **NOT_RUN**이다. 아래 설정은 실행 준비 중인 예시이며 연결 완료를 의미하지 않는다.
+
+`config.b1.example.json`은 B1의 X `127.0.0.1:8201`, Y `127.0.0.1:8202`, Bearer 자격 환경변수 이름과 이벤트 경로를 담는다. Z `8203`은 향후 예정 주소다. 설정 형식은 X/Y/Z를 모두 요구하지만 `prepare --platforms X Y`, `check --stage xy`는 X/Y만 관측한다.
+
+로컬 설정이 없을 때 다음과 같이 복사한다. 기존 로컬 설정은 덮어쓰지 않는다.
+
+```sh
+cp -n tests/conformance/config.b1.example.json tests/conformance/config.b1.local.json
+```
+
+- 1단계 검토 당시 `prepare_command`의 `implementations/canton/prepare.py`는 없는 예정 경로였다. PR #5 템플릿을 기준으로 작성한 현재 연결 코드와 미검증 범위는 제18절을 따른다.
+- 토큰 값은 설정에 넣지 않는다. B1 구현을 사용하는 환경에서 `scripts/adapter.sh tokens`를 어댑터 기동 전에 실행하고, 실행기와 적재 프로그램을 호출할 셸에도 `scripts/env.sh`로 자격을 불러온다. 이 경로들은 `implementations/canton/` 기준이다.
+- 기본 `evidence_dir`는 `implementations/canton/logs`다. 어댑터에 `CANTON_EVIDENCE_DIR`를 지정했다면 로컬 설정도 같은 실제 경로로 맞춘다. 이 환경변수 자체가 실행기 설정을 바꾸지는 않는다.
+- `X-Test-ID`·`X-Attempt-ID`, producer/clock/sequence는 현재 연결 규약과 맞는다. 1단계의 COMMAND_RECEIVED/FINISHED만으로 업무 확정·권리 이력을 검증할 수는 없다.
+
+| 다음 연결 시점 | 총괄 후속 작업·필요한 입력 |
+|---|---|
+| X→Y 템플릿·snapshot 준비 | 실제 템플릿 ID·필드·생성 권한·Party/Participant 연결을 받아 fixture 적재 작성. 새 run_id·기존 실행 거부·부분 실패를 검증하고 초기 snapshot 대조 |
+| X→Y 업무 로그 준비 | 실제 Contract ID와 공통 업무 ID, 내부 확정·권리 이력·로컬 반영 원본을 연결하고 `check --stage xy` 실행. 이력 부족은 INCONCLUSIVE |
+| X→Y 검증 후 Z 추가 전 | 실제 기준 버전·검증 배치 보존. 커밋은 사용자 승인 후 수행 |
+| Z·전체 검증 준비 | Z 적재·설정과 context.json의 실제 환경·파일 해시·기준 커밋·Z 변경 근거 연결 후 필수 전체 검증 |
+
+현재 설정 검증은 JSON 형식·필드 일치만 확인한다. Canton의 가동·토큰 유효성·업무 처리·보고된 자체 테스트 PASS의 재현을 대신하지 않는다. B2 실제 재할당 연결과 반복 실험은 제14절의 선행 검증 조건을 그대로 따른다.
+
+## 16. A 1단계 연결 준비 — 2026-11-21
+
+검토 기준은 [PR #3](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/3)의 `43c6e656ebc701c7b5641990aaf521bf92264841`이다. 검토 시 PR은 미병합이며 X·Y API와 독립 PostgreSQL 환경, DB 연결 확인만 제공한다. 공통 업무 API·인증·초기 적재·snapshot·공통 이벤트 연결과 인수 테스트는 **NOT_RUN**이다.
+
+기존 A용 `config.example.json`을 재사용한다. 로컬 설정이 없을 때만 복사하며, X/Y 주소는 PR의 `http://127.0.0.1:8101`, `http://127.0.0.1:8102`로 맞춘다. Z `8103`은 기존 예시 값으로, 수인님과 아직 확인하지 않은 예정 주소다.
+
+```sh
+cp -n tests/conformance/config.example.json tests/conformance/config.a.local.json
+```
+
+- `prepare_command`의 `implementations/db-api/prepare.py`는 아직 없다. 인증의 `POC_*_TOKEN` 환경변수 이름과 Bearer 전달, `evidence_dir`의 `implementations/db-api/logs`도 실행기 예시이며 A 구현과 확인이 필요하다. 실제 연결 전에는 이 설정으로 prepare/check/experiment를 실행하지 않는다.
+- `/health/db`의 HTTP 200은 자기 DB에 SQL을 실행하고 DB·사용자 식별을 확인했다는 뜻이다. 공통 snapshot·권한·금융 업무 검증이나 초기 적재 성공을 대신하지 않는다.
+- DB 5432 포트는 호스트에 게시되지 않는다. 총괄의 적재 프로그램이 호스트에서 `localhost:5432`로 직접 연결한다고 가정하지 않는다. 업무 테이블·권한이 정해지면 기존 Compose 안에서 적재를 실행하는 방법 등 실제 접근 경로를 담당자와 확인한다. 적재 편의를 위해 DB 포트를 임의로 공개하지 않는다.
+- DB 비밀번호인 `POSTGRES_X_PASSWORD`·`POSTGRES_Y_PASSWORD`와 은행·관측기 API 자격은 별개다. 값을 설정·로그·문서에 기록하지 않는다.
+
+다음 공유 시 수인님에게 받을 정보는 X/Y 업무 테이블·초기 데이터 생성 방법·적재 권한과 실행 위치, 공통 명령·조회·snapshot, API 자격과 권한 매핑, 실제 이벤트 파일 위치·필드·호출 식별자·flush 방법이다. 이 정보가 준비되면 총괄이 fixture 적재와 증빙을 연결하고 `check --stage xy`를 수행한다. 기존 공통 규칙·기대 결과를 바꾸어 연결하지 않는다.
+
+PR의 Windows Docker 실행 결과는 담당자 보고다. 이번 검토에서는 Compose 설정 검사, Python 구문 검사, DB 결과를 대체한 health 처리 함수의 정상·DB 불일치·사용자 불일치·SQL 오류 네 경로만 확인했다. 실제 이미지 빌드·컨테이너 기동·DB 접속·네트워크 격리는 재실행하지 않았다. X→Y 기준 버전 보존·Z 추가·전체 검증·실험은 제14절의 순서와 선행 조건을 따른다.
+
+## 17. A X→Y 초기 적재·이벤트 연결 — PR #4
+
+검토 기준은 [Draft PR #4](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/4)의 `285dfb09900aeede8b0398ff218d00fd75c04e73`이다. 제16절의 1단계 상태와 달리 이 버전에는 업무 테이블·명령·조회·snapshot·DB 이벤트가 있다. 아래 총괄 소유의 연결 프로그램은 이 스키마를 대상으로 한다. PR 검토용 코드를 임시 경로에서 사용했으며 저장소 브랜치를 바꾸거나 PR을 병합하지 않았다.
+
+- `implementations/db-api/prepare.py`: 공통 fixture 검증 후 X에는 REPO 합의와 A 초기 권리, Y에는 LOAN 합의를 적재한다. principals·bundles는 양쪽에 넣고 버전은 0이다. 거부 fixture의 합의 조건도 그대로 보존한다. 업무 거래·후속 권리·의무는 주입하지 않는다. Z 전용 margin_calls는 X/Y에 적재하지 않는다.
+- `implementations/db-api/collect_events.py`: 두 DB의 공통 이벤트 원본을 읽기 전용 트랜잭션으로 조회·검증해 하나의 JSONL로 원자 교체한다. DB를 수정하거나 이벤트를 만들지 않는다. 요청·예약·확정 관측 대기열이 남으면 최대 10초 동안 다시 확인하고, 끝내 정리되지 않으면 수집 실패다. 서로 다른 생산자 시계의 시간을 빼거나 전역 순서로 재해석하지 않는다.
+
+접속 정보는 환경변수로만 제공한다. 각 DSN은 libpq 연결 문자열 또는 PostgreSQL URI이며 코드·설정·명령 인자에 비밀번호를 넣지 않는다.
+
+| 환경변수 | 자격·권한 |
+|---|---|
+| `MODEL_A_X_SEED_DSN`, `MODEL_A_Y_SEED_DSN` | 각 DB의 `runs` SELECT 및 `runs/principals/bundles/agreements/rights` INSERT 권한. 업무 테이블 생성은 서비스가 먼저 수행 |
+| `MODEL_A_X_EVIDENCE_DSN`, `MODEL_A_Y_EVIDENCE_DSN` | 별도 읽기 전용 자격. `runs/requests/transfers/commit_observations/events` SELECT 권한 |
+| `POC_BANK_A_TOKEN`·`POC_BANK_B_TOKEN`·`POC_BANK_C_TOKEN`·`POC_OBSERVER_TOKEN` | API 프로세스와 실행기에 같은 자격 제공. PR #4의 Bearer 방식과 일치 |
+
+실제 DB 이름은 `model_a_x`, `model_a_y`, 서버는 PostgreSQL 17이어야 한다. DSN은 실제 접근 가능한 경로로 설정한다. Compose의 DB 포트를 공개한다고 가정하지 않으며, Compose 안에서 연결 프로그램을 실행하려면 이 스크립트·공통 checks/Schema/fixture를 읽을 수 있는 실행 위치와 각 DB 네트워크 접근을 준비해야 한다. 공개 포트나 추가 권한을 프로그램이 자동 생성하지 않는다.
+
+기존 실행기 가상환경에는 PR에서 사용하는 `psycopg[binary]==3.3.3`이 추가로 필요하다. `config.a.local.json`의 `prepare_command`를 `[".venv/bin/python", "implementations/db-api/prepare.py"]`로 맞추고 실제 API 주소·evidence_dir를 확인한다. 별도 가상환경을 쓰면 두 명령 모두 해당 Python 경로를 사용한다. 로컬 설정은 덮어쓰지 않고 필요한 필드만 확인한다.
+
+```sh
+.venv/bin/python tests/conformance/runner.py prepare \
+  --config tests/conformance/config.a.local.json --observer-auth bearer \
+  --fixture shared/fixtures/initial/f0-normal.json --platforms X Y
+
+.venv/bin/python tests/conformance/runner.py check \
+  --config tests/conformance/config.a.local.json --observer-auth bearer --stage xy \
+  --collect-command .venv/bin/python implementations/db-api/collect_events.py
+```
+
+`--collect-command`는 check의 선택적인 로컬 연결 옵션이다. 기존 설정 형식·업무 API·판정 규칙은 유지한다. 실행기는 각 시나리오의 기능 검사 후 argv에 `--run-id`, `--output <evidence_dir>/<run_id>/events.jsonl`을 붙여 수집기를 호출한다. 셸 문자열로 실행하지 않으며, 30초 한도·비영 종료는 INCONCLUSIVE다. 호출 명령·종료 코드·stdout/stderr는 비밀값을 가려 `evidence/collection.json`에 저장한다. 수집 뒤 기존 Schema·권리 이력·경합·인과관계 검사를 그대로 수행한다. experiment에는 이 옵션을 추가하지 않았다. Z와 최종 검증·환경 증빙이 준비되면 실험 수집 연결을 별도로 완료한다.
+
+준비 프로그램은 쓰기 전에 양쪽 run_id 존재를 확인하고, 각 DB의 기본 키로 중복·경합을 거부한다. 두 DB의 커밋은 원자적이지 않다. X만 적재된 실패 실행은 지우거나 재사용하지 않고 새 run_id로 다시 시작한다. 실패 시 비영 종료와 FAILED JSON을 남기며, DB 오류 원문·DSN을 출력하지 않는다.
+
+실제 연결에서 확인한 실행기 수정은 두 가지다. 초기 준비에서 검증한 S0를 이전 상태로 유지하여, Repo 이후에도 아직 갱신되지 않은 Y의 S0 로컬 기록을 허용한다. 또한 수락된 업무 결과가 없는 AC-02 readiness 조회와 AC-03 사전 거부에 한해 실제 수집된 빈 로그 파일을 허용한다. 파일 누락·수집 실패·업무 결과가 있는 실행의 빈 이력은 계속 INCONCLUSIVE다. 새 이벤트나 성공 결과를 대신 생성하지 않는다.
+
+### 실제 연결 검증 결과
+
+임시 Docker PostgreSQL **17.12** 두 개와 PR #4의 Python API 두 개로 검증했다. 기존 DB·서비스는 사용하지 않았다. 표준 Compose 전체를 기동한 시험은 아니며 임시 DB 포트는 루프백에만 열었다. 이벤트 수집에는 별도 SELECT 자격을 사용했다.
+
+- X→Y 공통 실행 `--stage xy`: **50 PASS, 0 FAIL, 0 INCONCLUSIVE**, 종료 코드 0. 경합 두 종류 각 10회와 응답 지연 복구 5회를 포함한다. 배치는 `results/model-a-pr4-connection-20261121/batches/batch-7417a92190294bd1b6035c3376db37e3/`다. `final_handoff_eligible=false`이며 전체 AC·Z·성능 검증은 아니다.
+- 초기 적재: 동일 run_id 재사용 거부, X 커밋 후 Y 권한 오류 시 FAILED와 X 데이터 보존, 부분 실패 run_id 재사용 거부를 실제 DB에서 확인했다. 준비만 한 실행의 이벤트는 0건으로 내보내며 가짜 이벤트를 만들지 않았다.
+- 실행기 자체 시험 **49 PASS**와 `git diff --check` 통과. `results/model-a-pr4-connection-20261121/`에 실행 결과·소스 해시·소스 복사본·검증 드라이버·자체 시험 출력을 보존했다. 수정 전 실패 배치 두 개도 남겼다.
+- 검증 후 API와 임시 DB 컨테이너를 종료·정리했다. 담당자의 Windows API/DB 재시작 자체 시험 58건 전체와 Compose 업무 흐름은 독립 재실행하지 않았다. 새 연결 프로그램은 미커밋이며, 팀 공유 및 실제 X→Y 기준 커밋 보존에는 사용자 승인이 필요하다.
+
+## 18. B1 X→Y 초기 적재 연결 — PR #5
+
+검토 기준은 [Draft PR #5](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/5)의 `a87cd3ec56276d400c02b8ebde0d07bd541360b5`, `collateral` 0.2.0이다. 이전 토큰 생성 순서와 확인용 DAR 빌드 안내는 반영됐다. 정상 X→Y 계약·명령·결과 조회·snapshot·readiness·이벤트가 제공되지만, 거절·중복·경합·복구는 여전히 3단계 대상이다. 이 절의 연결 코드 시험은 **모의 Ledger API 시험**이며 실제 B1 공통 검증은 **NOT_RUN**이다.
+
+총괄의 `implementations/canton/prepare.py`는 공통 fixture에서 `UseRight`의 A 초기 권리와 Repo 합의를 P_X에, Loan 합의를 P_Y에 만든다. 각 Participant당 한 번 제출하며 actAs는 각각 A/B, B/C다. 공통 fixture를 변경하지 않고 `reuse_allowed`, `ccp_use_allowed`, 담보 조건도 그대로 옮긴다. 거래 choice나 후속 권리·의무를 직접 생성하지 않는다. `principals`는 기존 API 토큰 매핑으로 다루고 Z 전용 데이터는 만들지 않는다.
+
+사용하려면 PR #5의 서비스를 기동하고 DAR를 올린 뒤, 그 환경의 `scripts/env.sh`를 source해 `CANTON_STATE_DIR`와 `POC_*_TOKEN`을 실행기에도 제공한다. 준비 프로그램은 `CANTON_STATE_DIR/ids.json`의 실제 Party ID와 P_X/P_Y JSON Ledger API 주소를 사용하며 localhost HTTP 주소만 허용한다. 초기 적재는 고권한 작업이므로 이 JSON Ledger API를 외부에 공개하지 않는다. 기본 설정과 로그 경로는 제15절을 재사용하고 `CANTON_EVIDENCE_DIR` 변경 시 실행기의 evidence_dir도 함께 맞춘다.
+
+```sh
+.venv/bin/python tests/conformance/runner.py prepare \
+  --config tests/conformance/config.b1.local.json --observer-auth bearer \
+  --fixture shared/fixtures/initial/f0-normal.json --platforms X Y
+
+.venv/bin/python tests/conformance/runner.py check \
+  --config tests/conformance/config.b1.local.json --observer-auth bearer \
+  --stage xy --case AC-01 AC-02
+```
+
+위 명령은 실제 Canton 연결 후 실행한다. B1은 어댑터가 이미 `<evidence_dir>/<run_id>/events.jsonl`을 쓰므로 A용 `--collect-command`를 붙이지 않는다. 아직 없는 거절·멱등성·경합·복구를 정상 통과로 대체하지 않고, 해당 단계 구현 뒤 전체 X→Y 공통 목록을 수행한다.
+
+준비 전 양쪽 ACS에서 기존 runId를 확인하고, 제출 전 `CANTON_STATE_DIR/conformance-preparations/<run_id>.json`을 배타적으로 생성·동기화한다. 이 로컬 표식은 성공·부분 실패·타임아웃 뒤에도 보존한다. P_X만 성공했거나 P_Y 응답을 잃으면 FAILED로 기록하고 같은 run_id를 재사용하지 않는다. 로컬 표식은 이 준비 프로그램의 중복 제출을 막는 수단이며, 여러 머신·수동 원장 제출까지 전역 유일성을 보장하지 않는다. 원장 계약 키나 업무 권한·멱등성의 대체물이 아니다.
+
+확인한 것은 5개 자체 시험이다: 실제 스키마의 fixture 조건 매핑, Participant/actAs별 S0 생성 요청, 기존 run 거부, 부분 성공 뒤 응답 미확정 시 표식 보존·재사용 거부, 외부 Ledger URL 거부. 실제 Daml 컴파일·Canton 제출·공통 정상 흐름은 이 환경에 툴체인·원장 상태가 없어 재실행하지 않았다.
+
+3단계에서 우선 대조할 항목은 원장 권한과 유효 권리 생성 경로, 업무 거절 코드와 동일 요청 멱등성·충돌, 실제 진행 상태·결과 미확정·복구, 재기동 후 snapshot 순번과 로그 증빙, 어댑터↔Participant 메시지 기록이다. 현재 UseRight의 보유자 단독 생성·Consume/Archive 경로와 snapshot의 소진 권리 기반 버전 계산은 거래 없이 권리·버전을 바꿀 수 있는 제약이다. 정상 경로 자체 시험으로 이 제약이 해소됐다고 판단하지 않는다. 계약 권한을 바꾸는 설계가 필요하면 담당자가 최소안과 업무·적재 영향을 먼저 공유하고 승인 후 반영한다.
+
+## 19. A Compose 통합 재검증 — 2026-11-22
+
+수인님 환경의 Docker I/O·읽기 전용 저장소 오류와 별도로, 총괄의 정상 Docker 환경에서 PR #4 `285dfb09900aeede8b0398ff218d00fd75c04e73`와 PR #6 `339d016803c8b1d9dd5008f2f88f586700ba5d49`를 임시 폴더에 조합해 검증했다. 브랜치 병합이나 기존 DB 사용 없이 원래 Compose 파일과 Dockerfile로 새 프로젝트·새 볼륨을 기동했다.
+
+- Docker Engine 29.8.2, Linux 컨테이너 Python 3.12.16, X·Y PostgreSQL 17.12. Compose 빌드·기동 성공 및 API/DB 네 개 모두 healthy.
+- DB 포트는 호스트에 공개하지 않았다. 별도 검증용 연결 컨테이너만 두 DB 네트워크에 참여하고, 적재에는 S0 테이블 INSERT·runs SELECT 자격, 수집에는 필요한 테이블 SELECT 자격을 사용했다. API의 원래 네트워크는 변경하지 않았다.
+- 호스트 실행기에서 연결 컨테이너의 준비·수집 프로그램을 호출해 초기 snapshot 확인과 **X→Y 공통 50건 PASS**, 종료 코드 0을 확인했다. 경합 각 10회·응답 지연 복구 5회를 포함하며 `final_handoff_eligible=false`다.
+- 결과는 `results/model-a-compose-pr4-pr6-20261122-final/verification.json`, 공통 배치는 그 아래 `batches/batch-580211b706b74306874ffd2202252a1f/`에 있다. 소스 복사본·SHA-256·검증 드라이버·Compose 로그도 함께 보존했다. 초기 연결 시도 두 번의 경로 매핑 실패 기록은 별도 결과 폴더에 보존했다. 모델 코드·fixture·판정 조건은 바꾸지 않았다.
+- 검증 후 이번 임시 프로젝트의 컨테이너·네트워크·볼륨만 정리했다. 수인님 원본 데이터와 현재 작업 브랜치의 구현 코드는 변경하지 않았다. Z·전체 최종 인수·성능 실험은 이 검증 범위 밖이다.
+
+수인님 PC의 Docker 저장소 복구는 별도 환경 문제로 남긴다. 복구를 위해 기존 데이터를 초기화하도록 요구하지 않고, 위 정상 환경의 재현 결과를 X→Y 기준 버전 검토 근거로 사용한다. 코드·명세·fixture·증거를 맞춰 기준 커밋을 확정하는 절차와 PR 병합은 사용자 승인 후 진행한다.
