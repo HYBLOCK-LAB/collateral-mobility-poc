@@ -1,0 +1,139 @@
+-- Pre-agreements of the fixture (agreements[]) and the business transactions
+-- confirmed under them (README §3). Both parties sign an agreement when the
+-- run is prepared, so the confirming party later exercises it alone: the
+-- counterparty's authority comes from its signature on the agreement.
+--
+-- The choices are nonconsuming: the agreement stays, and a second
+-- confirmation under it fails because the right it needs is consumed.
+module Collateral.Agreement where
+
+import Collateral.Record
+import Collateral.Right
+import Collateral.Types
+
+-- What a confirmation created, in creation order.
+data Confirmed = Confirmed
+  with
+    consumedRight : ContractId UseRight
+    nextRight : ContractId UseRight
+    trade : ContractId TradeContract
+    obligations : [ContractId Obligation]
+  deriving (Eq, Show)
+
+-- Checks the right a confirmation uses, consumes it and creates the next
+-- right for the counterparty. Returns the consumed and the next right.
+useRight
+  : Text -> Text -> Party -> Party -> UseCommand -> Int -> ContractId UseRight
+  -> Optional UseCommand -> Text -> Update (UseRight, ContractId UseRight, ContractId UseRight)
+useRight runId bundleId user counterparty command expectedVersion rightCid nextCommand recordId = do
+  right <- fetch rightCid
+  assertMsg "the right belongs to another run or bundle"
+    (right.runId == runId && right.bundle.bundleId == bundleId)
+  assertMsg "the right is held by another party" (right.holder == user)
+  assertMsg "the right is not available" (right.status == AVAILABLE)
+  assertMsg "the bundle version is not the expected one" (right.createdVersion == expectedVersion)
+  assertMsg "the right does not permit this command" (command `elem` right.allowedCommands)
+  consumed <- exercise rightCid Consume
+  let version = right.createdVersion + 1
+  next <- create UseRight with
+    runId
+    bundle = right.bundle
+    rightId = bundleId <> ":right:" <> show version
+    holder = counterparty
+    createdVersion = version
+    status = AVAILABLE
+    allowedCommands = optional [] (\c -> [c]) nextCommand
+    predecessorRightId = Some right.rightId
+    sourceRecordId = Some recordId
+  pure (right, consumed, next)
+
+template RepoAgreement
+  with
+    runId : Text
+    agreementId : Text
+    bundleId : Text
+    seller : Party
+    buyer : Party
+    reuseAllowed : Bool
+  where
+    signatory seller, buyer
+    ensure seller /= buyer
+
+    -- CONFIRM_REPO on X by BANK_A (interface §5.2).
+    nonconsuming choice ConfirmRepo : Confirmed
+      with
+        requestId : Text
+        repoId : Text
+        expectedVersion : Int
+        rightCid : ContractId UseRight
+      controller seller
+      do
+        (right, consumed, next) <- useRight runId bundleId seller buyer CONFIRM_REPO
+          expectedVersion rightCid (if reuseAllowed then Some CONFIRM_LOAN else None) repoId
+        trade <- create TradeContract with
+          runId; tradeId = repoId; contractType = REPO; agreementId; bundleId
+          parties = [seller, buyer]; requestId; actor = seller
+          versionBefore = expectedVersion; versionAfter = expectedVersion + 1
+        payment <- create Obligation with
+          runId; obligationId = repoId <> ":repurchase-payment"
+          obligationType = REPO_REPURCHASE_PAYMENT; debtor = seller; creditor = buyer
+          tradeId = repoId; agreementId; target = AgreementRef with agreementId
+          status = OUTSTANDING
+        securities <- create Obligation with
+          runId; obligationId = repoId <> ":securities-return"
+          obligationType = REPO_SECURITIES_RETURN; debtor = buyer; creditor = seller
+          tradeId = repoId; agreementId
+          target = Securities with
+            securityId = right.bundle.securityId; quantity = right.bundle.quantity
+          status = OUTSTANDING
+        pure Confirmed with
+          consumedRight = consumed; nextRight = next; trade
+          obligations = [payment, securities]
+
+template LoanAgreement
+  with
+    runId : Text
+    agreementId : Text
+    bundleId : Text
+    lender : Party
+    borrower : Party
+    ccpUseAllowed : Bool
+    collateral : CollateralCondition
+  where
+    signatory lender, borrower
+    ensure lender /= borrower
+
+    -- CONFIRM_LOAN on Y by BANK_B (interface §5.2).
+    nonconsuming choice ConfirmLoan : Confirmed
+      with
+        requestId : Text
+        loanId : Text
+        expectedVersion : Int
+        rightCid : ContractId UseRight
+      controller lender
+      do
+        assertMsg "the separate loan collateral is not eligible"
+          (collateral.provided && collateral.conditionsMet)
+        (right, consumed, next) <- useRight runId bundleId lender borrower CONFIRM_LOAN
+          expectedVersion rightCid (if ccpUseAllowed then Some ALLOCATE_MARGIN else None) loanId
+        trade <- create TradeContract with
+          runId; tradeId = loanId; contractType = LOAN; agreementId; bundleId
+          parties = [lender, borrower]; requestId; actor = lender
+          versionBefore = expectedVersion; versionAfter = expectedVersion + 1
+        securities <- create Obligation with
+          runId; obligationId = loanId <> ":securities-return"
+          obligationType = LOAN_SECURITIES_RETURN; debtor = borrower; creditor = lender
+          tradeId = loanId; agreementId
+          target = Securities with
+            securityId = right.bundle.securityId; quantity = right.bundle.quantity
+          status = OUTSTANDING
+        release <- create Obligation with
+          runId; obligationId = loanId <> ":collateral-return"
+          obligationType = LOAN_COLLATERAL_RETURN_OR_RELEASE; debtor = lender; creditor = borrower
+          tradeId = loanId; agreementId
+          target = CollateralRef with
+            collateralId = collateral.collateralId; agreementId
+          status = OUTSTANDING
+        pure Confirmed with
+          consumedRight = consumed; nextRight = next; trade
+          obligations = [securities, release]

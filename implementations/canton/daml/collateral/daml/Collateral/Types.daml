@@ -1,0 +1,64 @@
+-- Data types shared by the business templates (README §3).
+-- Enum constructors carry the common names of shared/schemas (CONFIRM_LOAN,
+-- AVAILABLE, REPO_SECURITIES_RETURN, ...), so the adapter maps a ledger value
+-- to the common JSON without a translation table. Amounts and quantities are
+-- Text: the PoC never computes with them and the fixture strings are kept as
+-- they are.
+module Collateral.Types where
+
+data Quantity = Quantity
+  with
+    value : Text
+    unit : Text
+  deriving (Eq, Show)
+
+data Money = Money
+  with
+    amount : Text
+    currency : Text
+  deriving (Eq, Show)
+
+-- One whole government bond bundle (fixture bundles[] without initial_holder).
+data Bundle = Bundle
+  with
+    bundleId : Text
+    securityId : Text
+    quantity : Quantity
+    referenceValue : Money
+  deriving (Eq, Show)
+
+-- The business commands a right can permit (common.schema right.allowed_commands).
+data UseCommand = CONFIRM_REPO | CONFIRM_LOAN | ALLOCATE_MARGIN
+  deriving (Eq, Show)
+
+data RightStatus = AVAILABLE | CONSUMED | LOCKED
+  deriving (Eq, Show)
+
+data ContractType = REPO | LOAN
+  deriving (Eq, Show)
+
+data ObligationType
+  = REPO_REPURCHASE_PAYMENT
+  | REPO_SECURITIES_RETURN
+  | LOAN_SECURITIES_RETURN
+  | LOAN_COLLATERAL_RETURN_OR_RELEASE
+  deriving (Eq, Show)
+
+-- The normal path keeps every obligation outstanding (interface §8.2).
+data ObligationStatus = OUTSTANDING
+  deriving (Eq, Show)
+
+-- What an obligation refers to (common.schema obligation.target).
+data ObligationTarget
+  = AgreementRef with agreementId : Text
+  | Securities with securityId : Text; quantity : Quantity
+  | CollateralRef with collateralId : Text; agreementId : Text
+  deriving (Eq, Show)
+
+-- Separate collateral of the securities loan (fixture collateral_condition).
+data CollateralCondition = CollateralCondition
+  with
+    collateralId : Text
+    conditionsMet : Bool
+    provided : Bool
+  deriving (Eq, Show)
