@@ -1,0 +1,157 @@
+{
+  "record_type": "postgresql_integration_run_summary",
+  "validation_date": "2026-11-21",
+  "timezone": "Asia/Seoul",
+  "model": "A",
+  "scope": "X→Y 2단계 개발 공유",
+  "test_id": "SELFTEST-XY",
+  "source": {
+    "branch": "feat/model-a-xy",
+    "base_commit": "a64e69400e6c14648be8cec2b2e71355f1311403",
+    "sha256_line_endings": "LF",
+    "implementation_files": {
+      "implementations/db-api/.dockerignore": "27f0e909ab4940b0e7ed6c482b890f37f1037fd254d2e213fb6a75b17250f265",
+      "implementations/db-api/Dockerfile": "17dda3b96519436cb02f69359042933700abd53c684e7514b309ca95dd70593b",
+      "implementations/db-api/app.py": "8fc148d6edc858209eff30ad801377ec422113dd5f8af366a798a19958474e1b",
+      "implementations/db-api/compose.yaml": "358f210ef5669d73d3f1ce9043a82748a1395e01dec26aef394cd68269b0b2cd",
+      "implementations/db-api/env.example": "1800127e22cdda1b420eb322c69d15c52de40065fc9fb7d76a79cfd8b309086c",
+      "implementations/db-api/requirements.txt": "ed7d82f13c9765e27322176185736b8d2c0eed478097a4d76f530f96a49f6d55",
+      "implementations/db-api/selftest.py": "b6260bb7b29aed8fc92445bb610a6e88125e8235d478db56cefd026af324485b",
+      "implementations/db-api/storage.py": "289b3210c1824334fdba7aeca0ab339a45c90925c9d7ecce1c3cfe1884f5d646",
+      "implementations/db-api/workflow.py": "b2dacc95d8aa87a71e9dfcd39c3b70862eca7aca564fba47b459408425395ac7"
+    }
+  },
+  "environment": {
+    "api_host": "Windows, Python 3.12.2, FastAPI/Uvicorn",
+    "database_host": "WSL Ubuntu 26.04.1 LTS",
+    "database_version": "PostgreSQL 17.12 (Ubuntu 17.12-1.pgdg26.04+1)",
+    "database_auth": "SCRAM-SHA-256",
+    "packages": "PGDG signed APT repository",
+    "topology": {
+      "X": {
+        "api": "127.0.0.1:18201",
+        "db": "127.0.0.1:15432",
+        "database": "model_a_x"
+      },
+      "Y": {
+        "api": "127.0.0.1:18202",
+        "db": "127.0.0.1:15433",
+        "database": "model_a_y"
+      }
+    }
+  },
+  "inputs": {
+    "initial_fixture": "shared/fixtures/initial/f0-normal.json",
+    "command_fixtures": [
+      "shared/fixtures/commands/repo.json",
+      "shared/fixtures/commands/loan.json"
+    ],
+    "expected_state_fixtures": [
+      "shared/fixtures/expected/s0.json",
+      "shared/fixtures/expected/s1.json",
+      "shared/fixtures/expected/s2.json"
+    ],
+    "setup": "실행마다 두 임시 DB에 새 run_id를 만들고 S0만 적재했다. Repo와 증권대차는 실제 HTTP API로 실행했다."
+  },
+  "runs": [
+    {
+      "run_id": "xy-normal-7699df9a",
+      "scenario": "normal",
+      "status": "PASS",
+      "checks": [
+        "S0, S1, S2가 공통 단계별 기대값과 일치",
+        "원래 요청 결과 조회 일치",
+        "Y readiness는 S0에서 거짓, S1에서 참이며 조회 전후 업무 snapshot 동일",
+        "DB 이벤트의 공통 Schema와 X 소진→Y 생성 메시지 인과관계 확인"
+      ],
+      "validated_event_count": 24,
+      "stdout_excerpt": [
+        "xy-normal-7699df9a S0 PASS",
+        "xy-normal-7699df9a S1 PASS",
+        "xy-normal-7699df9a S2 PASS",
+        "xy-normal-7699df9a SELFTEST-XY PASS",
+        "xy-normal-7699df9a persisted events=24, schema and X consumption -> Y creation PASS"
+      ]
+    },
+    {
+      "run_id": "xy-reserved-fault-86d63335",
+      "scenario": "fault_after_reservation",
+      "status": "PASS",
+      "injection": "X transfers의 CONSUMED 쓰기를 해당 실행 전용 DB 트리거로 차단했다.",
+      "checks": [
+        "B은행 권리가 보존되고 예약 중 사용이 차단됨",
+        "C은행 권리와 버전 2가 생기지 않음",
+        "차단 해제 후 동일 요청이 한 번 확정, 재제출 결과 일치, S2에서 진행 상태 정리",
+        "영속 이벤트 Schema 및 소진→생성 인과관계 확인"
+      ],
+      "validated_event_count": 24,
+      "stdout_excerpt": [
+        "xy-reserved-fault-86d63335 persisted events=24, schema and X consumption -> Y creation PASS",
+        "xy-reserved-fault-86d63335 protected pending state and same-request recovery/replay PASS"
+      ]
+    },
+    {
+      "run_id": "xy-consumed-fault-a3d1e778",
+      "scenario": "fault_after_x_consumption",
+      "status": "PASS",
+      "injection": "Y rights의 버전 2 행 삽입을 해당 실행 전용 DB 트리거로 차단했다.",
+      "checks": [
+        "X B은행 권리 소진 확인",
+        "Y 결과 PENDING, C은행 권리와 버전 2 미생성",
+        "차단 해제 후 동일 요청으로 S2 확정, 재제출 결과 일치, 활성 예약 및 진행 상태 제거",
+        "영속 이벤트 Schema 및 소진→생성 인과관계 확인"
+      ],
+      "validated_event_count": 29,
+      "stdout_excerpt": [
+        "xy-consumed-fault-a3d1e778 persisted events=29, schema and X consumption -> Y creation PASS",
+        "xy-consumed-fault-a3d1e778 protected pending state and same-request recovery/replay PASS"
+      ]
+    },
+    {
+      "run_id": "xy-abort-fac865ff",
+      "scenario": "reservation_release_before_final_rejection",
+      "status": "PASS",
+      "injection": "X의 예약 삽입을 일시 차단한 동안 Y에 복사된 담보 제공 조건을 무효화했다. 차단 해제 후 X 예약과 Y의 재검사·해제를 실행했다.",
+      "checks": [
+        "X 영속 예약 상태 RELEASED 확인 후 Y REJECTED",
+        "B은행 권리 AVAILABLE, C은행 권리 미생성, X 업무 버전 1 유지",
+        "활성 예약 및 진행 상태 없음, 대차 권리 생성 이벤트 없음"
+      ],
+      "stdout_excerpt": [
+        "xy-abort-fac865ff durable reservation release and rejection preserve B right and version PASS"
+      ]
+    }
+  ],
+  "evidence_retention": {
+    "saved_in_git_candidate": [
+      "실행별 판정과 확인 항목",
+      "검증 콘솔 출력 발췌",
+      "검증 코드의 LF 기준 SHA-256"
+    ],
+    "not_saved": [
+      "개별 DB 이벤트 원본 JSONL",
+      "HTTP 요청·응답 원본",
+      "일회성 장애 주입 실행기"
+    ],
+    "note": "실제 DB에서 조회한 이벤트로 검사했다. 이 파일은 검사 결과 요약이며 공통 실행기에 넣을 events.jsonl은 후속 실행에서 수집한다."
+  },
+  "remaining": [
+    {
+      "test": "2단계 Docker Compose 이미지 빌드",
+      "status": "FAIL",
+      "reason": "BuildKit 저장소 read-only 오류로 중단"
+    },
+    {
+      "test": "2단계 Docker Compose 기동·거래 재검증",
+      "status": "NOT_RUN"
+    },
+    {
+      "test": "공통 인수 테스트와 초기 적재·로그 연결",
+      "status": "NOT_RUN"
+    },
+    {
+      "test": "전체 경합 및 API·DB 재시작 복구",
+      "status": "NOT_RUN"
+    }
+  ]
+}
