@@ -122,6 +122,9 @@ class XYSelftest:
         self.results: list[dict] = []
         self.previous: list[dict] = []
         self.committed: dict[str, tuple[dict, dict]] = {}
+        # Record IDs of the expected states (checks.expected_state); a
+        # contention case names the winning request's IDs.
+        self.record_ids: dict[str, str] = {}
 
     # --- reporting -------------------------------------------------------
 
@@ -259,7 +262,7 @@ class XYSelftest:
         return found
 
     def state(self, version: int) -> dict:
-        expected = expected_state(self.fixture, version)
+        expected = expected_state(self.fixture, version, **self.record_ids)
         deadline = time.monotonic() + STATE_WAIT
         while True:
             snapshots = self.snapshots()
