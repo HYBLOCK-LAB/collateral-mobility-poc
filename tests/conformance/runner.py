@@ -205,7 +205,8 @@ class Execution:
         self.test_id, self.platforms = test_id, platforms
         self.secrets = secret_values(config)
         self.clock = "observer-" + run_id
-        self.events, self.results, self.previous = [], [], []
+        # Preparation already verified S0; an untouched peer may still expose it.
+        self.events, self.results, self.previous = [], [], [expected_state(fixture, 0)]
         self.preacceptance_errors = []
         self.race_requests = []
         self.reassigned = False
@@ -726,7 +727,8 @@ def collect_history(execution):
     write_json(execution.path / "evidence/implementation-events.json", {"source": str(source),
                "sha256": hashlib.sha256(original).hexdigest(), "body": text}, execution.secrets)
     events = [parse_json(line) for line in text.splitlines() if line.strip()]
-    if not events:
+    # Readiness-only and preacceptance refusals can produce no business events.
+    if not events and (execution.test_id not in ("AC-02", "AC-03") or execution.results):
         raise EvidenceMissing("implementation event log empty")
     for event in events:
         validate(event, "event.schema.json")
@@ -735,6 +737,24 @@ def collect_history(execution):
             raise CheckError("implementation event identity mismatch")
     history_check(events, execution.results, execution.race_requests)
     return events
+
+
+def export_implementation_events(command, execution):
+    """Optional local collector; business processing has already finished."""
+    if not command:
+        return
+    output = (ROOT / execution.config["evidence_dir"] / execution.run_id / "events.jsonl").resolve()
+    try:
+        completed = subprocess.run(
+            [*command, "--run-id", execution.run_id, "--output", str(output)],
+            cwd=ROOT, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceMissing("implementation collector " + type(error).__name__) from None
+    write_json(execution.path / "evidence/collection.json", {
+        "command": command, "returncode": completed.returncode, "stdout": completed.stdout,
+        "stderr": completed.stderr}, execution.secrets)
+    if completed.returncode:
+        raise EvidenceMissing("implementation collector failed; see evidence/collection.json")
 
 
 async def execute_case(args, config, case, batch, index):
@@ -762,6 +782,7 @@ async def execute_case(args, config, case, batch, index):
         else:
             await execution.scenario(case["variant"])
         row["functional_verdict"] = "PASS"
+        await asyncio.to_thread(export_implementation_events, getattr(args, "collect_command", None), execution)
         collect_history(execution)
         if execution.reassignment and execution.reassignment["total_preparation_ms"] is None:
             raise EvidenceMissing("overall reassignment timing evidence is not comparable")
@@ -1102,6 +1123,8 @@ def main():
     check.add_argument("--final", action="store_true")
     check.add_argument("--observer-auth", choices=("bearer",), required=True)
     check.add_argument("--output", default=str(ROOT / "results"))
+    check.add_argument("--collect-command", nargs="+",
+                       help="Local read-only event collector argv; receives --run-id and --output after each case")
     check.add_argument("--prerequisite-batch", action="append", default=[])
     experiment = commands.add_parser("experiment", help="Fixed attempts; never top up failures")
     experiment.add_argument("--config", nargs="+", required=True)
