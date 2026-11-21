@@ -1,0 +1,40 @@
+-- Records a confirmed transaction leaves on the ledger (README §3): the trade
+-- contract (Repo or securities loan) and its outstanding obligations. Both
+-- parties sign them; the confirming choice creates them with the authority
+-- of the pre-agreement's signatories.
+module Collateral.Record where
+
+import Collateral.Types
+
+template TradeContract
+  with
+    runId : Text
+    tradeId : Text
+    contractType : ContractType
+    agreementId : Text
+    bundleId : Text
+    parties : [Party]
+    -- The request that confirmed the trade, for the result query
+    -- (interface §6) after the adapter has restarted.
+    requestId : Text
+    actor : Party
+    versionBefore : Int
+    versionAfter : Int
+  where
+    signatory parties
+    ensure length parties == 2 && versionAfter == versionBefore + 1
+
+template Obligation
+  with
+    runId : Text
+    obligationId : Text
+    obligationType : ObligationType
+    debtor : Party
+    creditor : Party
+    tradeId : Text
+    agreementId : Text
+    target : ObligationTarget
+    status : ObligationStatus
+  where
+    signatory debtor, creditor
+    ensure debtor /= creditor
