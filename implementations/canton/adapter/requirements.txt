@@ -1,0 +1,6 @@
+# Platform adapter (adapter/server.py) and its self-test. Python 3.12.
+aiohttp==3.14.5
+# Same pins as tests/conformance/requirements.txt: requests and responses are
+# validated against shared/schemas with the runner's validator version.
+jsonschema==4.26.0
+referencing==0.37.0

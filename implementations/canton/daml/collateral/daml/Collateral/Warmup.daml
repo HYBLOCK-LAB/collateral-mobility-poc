@@ -1,0 +1,12 @@
+-- Warm-up transaction of the platform adapters (README §2, step 1).
+-- After a restart the first command through a participant takes seconds
+-- (stage 1 measurement: 2.2 s), so each adapter creates and archives one
+-- Warmup contract before it accepts requests. Nothing stays in the ACS.
+module Collateral.Warmup where
+
+template Warmup
+  with
+    party : Party
+    bootId : Text
+  where
+    signatory party

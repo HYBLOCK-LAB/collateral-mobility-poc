@@ -1,0 +1,53 @@
+-- Contracts for the stage 1 checks (implementations/canton/README.md §2 step 1).
+-- Every contract carries probeId so that one probe run never reads another's.
+module Stage1Probe where
+
+import DA.Action (when)
+import DA.Fail
+import DA.TextMap qualified as TM
+
+-- Signed by owner, disclosed to viewers. Visibility checks and ACS timing.
+template Note
+  with
+    owner : Party
+    viewers : [Party]
+    probeId : Text
+    tag : Text
+  where
+    signatory owner
+    observer viewers
+
+-- A right that issuer granted to holder. Both sign it, holder uses it once.
+-- Use is consuming, so two concurrent uses of one contract must not both commit.
+template Grant
+  with
+    issuer : Party
+    holder : Party
+    probeId : Text
+    tag : Text
+    qty : Int
+  where
+    signatory issuer, holder
+
+    choice Use : ContractId Receipt
+      with
+        need : Int
+        via : Text
+      controller holder
+      do
+        when (need > qty) $
+          failWithStatus $ FailureStatus "RIGHT_UNAVAILABLE" InvalidGivenCurrentSystemStateOther
+            "requested quantity exceeds the granted quantity"
+            (TM.fromList [("probeId", probeId), ("tag", tag)])
+        create Receipt with issuer; holder; probeId; tag; via
+
+-- Result of a successful Use; records which participant submitted it.
+template Receipt
+  with
+    issuer : Party
+    holder : Party
+    probeId : Text
+    tag : Text
+    via : Text
+  where
+    signatory issuer, holder
