@@ -1,5 +1,5 @@
 import logging
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from sqlalchemy import select
@@ -103,6 +103,8 @@ class Workflow:
                 command=command, context=context, result=reply,
                 phase="RESERVE" if reply["outcome"] == "PENDING" else "DONE",
             ))
+            if reply["outcome"] == "COMMITTED":
+                connection.execute(db.commit_observations.insert().values(**request_keys))
         return reply, None
 
     def commit(self, connection, context, bundle, agreement, kind, first, second, allowed):
@@ -156,11 +158,18 @@ class Workflow:
             source_record_id=source, right_status=status,
         )
 
-    def applied(self, connection, context, reply):
-        effect = reply["effect"]
-        for event_type in ("INTERNAL_COMMITTED", "LOCAL_APPLIED"):
-            self.log.write(connection, context, event_type, outcome="COMMITTED",
-                           version_before=effect["version_before"], version_after=effect["version_after"])
+    def publish_commit_observation(self, request_keys):
+        with self.engine.begin() as connection:
+            if db.one(connection, db.commit_observations, lock=True, **request_keys) is None:
+                return
+            request = db.one(connection, db.requests, **request_keys)
+            effect = request["result"]["effect"]
+            # This clock observes a committed fact. A restart cannot recover the
+            # previous process's commit-acknowledgment time.
+            for event_type in ("INTERNAL_COMMITTED", "LOCAL_APPLIED"):
+                self.log.write(connection, request["context"], event_type, outcome="COMMITTED",
+                               version_before=effect["version_before"], version_after=effect["version_after"])
+            connection.execute(db.commit_observations.delete().filter_by(**request_keys))
 
     def authority(self, connection, run_id, bundle_id, expected=None):
         keys = dict(run_id=run_id, bundle_id=bundle_id)
@@ -200,28 +209,44 @@ class Workflow:
         if transfer is None:
             return None
         state = transfer["state"]
+        newly_consumed = False
         if state == "RESERVED" and phase == "CONFIRM":
             right_keys = dict(bundle_keys(context), created_version=1)
             right = db.one(connection, db.rights, **right_keys)
             db.change(connection, db.rights, right_keys, status="CONSUMED", allowed_commands=[])
             self.right_event(connection, context, 1, "CONSUMED", right["source_record_id"])
             state = "CONSUMED"
+            newly_consumed = True
         elif state == "RESERVED" and phase == "ABORT":
             state = "RELEASED"
         if state != transfer["state"]:
             db.change(connection, db.transfers, keys, state=state)
         right = db.one(connection, db.rights, **bundle_keys(context), created_version=1)
-        return {"state": state, "denial": transfer["denial"],
-                "source_record_id": right["source_record_id"] if right else None}
+        source_record_id = right["source_record_id"] if right else None
+        answer = {"state": state, "denial": transfer["denial"], "source_record_id": source_record_id}
+        if newly_consumed:
+            # Publish the confirmation to the durable X→Y channel in the same
+            # transaction as consumption. HTTP only transports that message.
+            confirmation = dict(keys, message_id=uuid4().hex, source_record_id=source_record_id)
+            connection.execute(db.transfer_confirmations.insert().values(**confirmation))
+            self.message(connection, context, "MESSAGE_SENT", confirmation["message_id"],
+                         "X", "Y", "EVENT", category="PROTOCOL")
+            answer["confirmation"] = confirmation
+        elif state == "CONSUMED":
+            confirmation = db.one(connection, db.transfer_confirmations, **keys)
+            if confirmation is not None:
+                answer["confirmation"] = dict(confirmation)
+        return answer
 
     def loan_id_taken(self, connection, context):
         return any(row["state"] in ("RESERVED", "CONSUMED") for row in db.rows(
             connection, db.transfers, run_id=context["run_id"], record_id=context["record_id"],
         ))
 
-    def message(self, connection, context, event_type, message_id, source, destination, kind):
+    def message(self, connection, context, event_type, message_id, source, destination, kind,
+                category="BUSINESS_INTEGRATION"):
         self.log.write(connection, context, event_type, message_id=message_id, source_id=source,
-                       destination_id=destination, message_kind=kind, message_category="BUSINESS_INTEGRATION")
+                       destination_id=destination, message_kind=kind, message_category=category)
 
     def notify_x(self, context, command, phase):
         message_id = uuid4().hex
@@ -233,8 +258,22 @@ class Workflow:
         answer = response.json()
         if not isinstance(answer, dict) or not isinstance(answer.get("state"), str):
             raise ValueError("Unrecognized transfer response")
+        confirmation = answer.get("confirmation")
+        if confirmation is not None and (
+            not isinstance(confirmation, dict)
+            or answer["state"] != "CONSUMED"
+            or confirmation.get("run_id") != context["run_id"]
+            or confirmation.get("request_id") != context["request_id"]
+            or confirmation.get("source_record_id") != answer["source_record_id"]
+            or not isinstance(confirmation.get("message_id"), str)
+            or UUID(confirmation["message_id"]).hex != confirmation["message_id"]
+        ):
+            raise ValueError("Unrecognized durable confirmation")
         with self.engine.begin() as connection:
             self.message(connection, context, "MESSAGE_RECEIVED", answer["message_id"], "X", "Y", "RESPONSE")
+            if confirmation is not None:
+                self.message(connection, context, "MESSAGE_RECEIVED", confirmation["message_id"],
+                             "X", "Y", "EVENT", category="PROTOCOL")
         return answer
 
     def advance(self, request_keys):
@@ -251,7 +290,6 @@ class Workflow:
                 answer = self.notify_x(context, command, phase)
             except (httpx.HTTPError, ValueError, KeyError):
                 return request["result"]
-            committed = False
             with self.engine.begin() as connection:
                 db.one(connection, db.runs, lock=True, run_id=context["run_id"])
                 current = db.one(connection, db.requests, **request_keys)
@@ -273,14 +311,12 @@ class Workflow:
                 elif phase == "CONFIRM" and state == "CONSUMED":
                     reply = self.finish_loan(connection, context, current["accepted_agreement"],
                                              answer["source_record_id"])
-                    committed = True
                 else:
                     logger.error("Unexpected transfer state %s for phase %s", state, phase)
                     return current["result"]
                 db.change(connection, db.requests, request_keys, phase="DONE", result=reply, abort_code=None)
-            if committed:
-                with self.engine.begin() as connection:
-                    self.applied(connection, context, reply)
+                if reply["outcome"] == "COMMITTED":
+                    connection.execute(db.commit_observations.insert().values(**request_keys))
             return reply
         with self.engine.connect() as connection:
             return db.one(connection, db.requests, **request_keys)["result"]
@@ -296,6 +332,12 @@ class Workflow:
         return self.commit(connection, context, bundle, agreement, "LOAN", "BANK_B", "BANK_C", allowed)
 
     def recover(self):
+        with self.engine.connect() as connection:
+            observations = connection.execute(select(db.commit_observations)).mappings().all()
+        for observation in observations:
+            self.publish_commit_observation(dict(observation))
+        if self.log.platform != "Y":
+            return
         with self.engine.connect() as connection:
             pending = connection.execute(select(db.requests.c.run_id, db.requests.c.actor,
                                                 db.requests.c.request_id)

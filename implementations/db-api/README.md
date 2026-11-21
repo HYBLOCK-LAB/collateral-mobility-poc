@@ -83,7 +83,7 @@ docker compose down
 
 ## 2단계 DB 구조와 초기 적재 연결
 
-API 시작 시 [storage.py](storage.py)의 SQLAlchemy 메타데이터가 각 DB에 아래 10개 테이블을 생성한다. 두 DB의 스키마는 같으며, X는 Repo와 예약을, Y는 증권대차와 복구 진행을 담당한다. `runs`를 제외한 모든 테이블은 `run_id`를 외래 키로 참조한다.
+API 시작 시 [storage.py](storage.py)의 SQLAlchemy 메타데이터가 각 DB에 아래 13개 테이블을 생성한다. 두 DB의 스키마는 같으며, X는 Repo와 예약을, Y는 증권대차와 복구 진행을 담당한다. `runs`를 제외한 모든 테이블은 `run_id`를 외래 키로 참조한다.
 
 | 테이블 | 기본 키 | 주요 열과 제약조건 |
 |---|---|---|
@@ -96,7 +96,10 @@ API 시작 시 [storage.py](storage.py)의 SQLAlchemy 메타데이터가 각 DB�
 | `obligations` | `run_id, obligation_id` | 같은 실행의 계약을 참조한다. 계약당 같은 유형의 의무는 한 건이며, `debtor, creditor, target`으로 당사자와 대상을 기록한다. |
 | `requests` | `run_id, actor, request_id` | 명령 원문, 결과, 이벤트 연결 정보, 수락한 합의, `RESERVE/CONFIRM/ABORT/DONE`을 저장한다. `DONE`은 `PENDING`이 아닌 결과와 짝을 이루며, `ABORT`에는 거부 사유, `CONFIRM`에는 수락한 합의가 필요하다. 부분 유일 인덱스로 동일 실행의 `PENDING/COMMITTED` 거래 ID 재사용을 막는다. |
 | `transfers` | `run_id, request_id` | X의 예약 상태 `DENIED/RESERVED/CONSUMED/RELEASED`를 저장한다. `DENIED`에만 사유가 있어야 한다. 부분 유일 인덱스로 묶음당 활성 예약 하나, 거래 ID당 예약 또는 소진 기록 하나를 허용한다. |
+| `transfer_confirmations` | `run_id, request_id` | X에서 `transfers`의 소진 결과에 연결하는 영속 확인 메시지다. 실행 내 고유 `message_id`와 Repo의 `source_record_id`를 저장한다. |
 | `events` | `run_id, event_id` | 공통 이벤트 객체를 `payload` JSONB에 저장한다. |
+| `snapshot_counters` | `run_id` | 플랫폼의 각 실행에서 발급한 마지막 `snapshot_seq`를 저장한다. API 재시작 후에도 DB의 순번을 이어 쓴다. |
+| `commit_observations` | `run_id, actor, request_id` | 확정된 `requests` 행에 연결하는 영속 대기열이다. 확정·로컬 반영 이벤트 기록이 끝나면 항목을 비운다. |
 
 ### F0 초기 적재 순서
 
@@ -161,7 +164,63 @@ ORDER BY payload->>'producer_id', (payload->>'sequence')::bigint
 | 확정과 상태 반영 | `COMMAND_RECEIVED/COMMAND_FINISHED`, `INTERNAL_COMMITTED/LOCAL_APPLIED`, `RIGHT_CREATED/RIGHT_CONSUMED`. 버전, 권리 ID·주체·상태를 이벤트 유형에 맞춰 기록한다. |
 | X→Y 인과관계 | `MESSAGE_SENT/MESSAGE_RECEIVED`의 `message_id, source_id, destination_id, message_kind, message_category`로 메시지를 연결한다. 같은 시계에서 X의 소진→송신과 Y의 수신→생성 순서를 각각 확인한다. |
 
-권리 변경 이벤트는 해당 DB 변경과 함께 커밋된다. 확정·로컬 반영 시각은 DB 트랜잭션 성공을 확인한 뒤 기록한다. DB 커밋 직후 프로세스가 종료되어 시각 증빙이 누락되면 가짜 이벤트를 복원하지 않는다. 원본 수집기의 자동 연결과 전체 장애·경합 계측은 후속 검증 항목이다.
+### X 재시작 이후의 소진 증거
+
+X는 B 권리 소진과 같은 트랜잭션에서 Y 앞으로 소진 확인 메시지를 발행한다. `transfer_confirmations` 행과 해당 `MESSAGE_SENT`는 소진이 커밋된 경우에만 함께 남는다. 이 `EVENT/PROTOCOL` 이벤트는 DB 채널에 메시지를 발행했다는 의미다. 실제 HTTP 요청과 응답은 기존 `REQUEST/RESPONSE` 및 `BUSINESS_INTEGRATION` 이벤트로 시도마다 별도 ID를 기록한다.
+
+재시작한 X는 동일 `run_id`·`request_id`의 소진 결과를 조회할 때 원래 확인 메시지를 새 HTTP 응답에 담는다. Y가 받아 `run_id`, `request_id`, 원거래 ID를 검증한 뒤에만 같은 영속 메시지 ID로 수신 이벤트를 남긴다. 이로써 이전 X 시계의 소진→메시지 발행과 Y 시계의 실제 수신→권리 생성 사이를 연결한다. 기존 이벤트 시각과 시계 ID는 그대로 보존한다.
+
+도입 전에 이미 소진된 요청은 영속 확인 메시지를 소급 생성하지 않는다. 원래 결과를 읽어 업무 복구는 계속할 수 있으며, 인과관계 증거는 당시 남은 관측 범위에서 판정한다.
+
+권리 변경 이벤트와 `commit_observations` 항목은 각각 해당 업무 변경과 함께 커밋된다. X·Y는 확정 결과가 DB에 반영됐음을 확인한 프로세스의 `clock_id`·`sequence`·`mono_ns`로 `INTERNAL_COMMITTED`와 `LOCAL_APPLIED`를 남긴다. 이벤트 두 건과 대기열 제거는 한 트랜잭션이다. 기록 전에 서버가 종료되면 다음 프로세스가 대기열을 처리한다. 이 경우 기록 시각은 복구 프로세스가 확정을 확인한 시각이며 원래 DB 커밋 순간은 복원하지 않는다. 공통 관측기의 응답 수신 시각은 별도로 유지한다.
+
+snapshot의 업무 데이터는 읽기 전용 트랜잭션에서 조회한다. 응답 순번은 이후 로컬 DB의 별도 카운터를 원자적으로 증가시켜 발급한다. 카운터는 업무 버전이나 권리·계약·의무에 영향을 주지 않는다. 이벤트의 순번은 생산자·시계별로 관리되며 API 재시작 시 새로운 식별자를 사용한다.
+
+## 3단계 자체 검증 실행
+
+검증은 Windows의 임시 X·Y API 프로세스와 WSL의 독립 PostgreSQL 17 인스턴스 두 개를 사용한다. 위의 DB 접속 정보와 같은 별도의 **테스트 전용 DB**를 준비한다. 기존 Docker 데이터나 운영 DB는 테스트 대상으로 사용하지 않는다. 검증기는 `XY_PG_X_PASSWORD`와 `XY_PG_Y_PASSWORD`를 프로세스 환경에서 읽고 API 토큰은 검증 실행마다 자체 생성한다.
+
+```powershell
+Set-Location implementations/db-api
+$evidence = 'logs/stage3-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
+.\.venv\Scripts\python.exe stage3_verify.py --output $evidence --wsl-db-restarts
+```
+
+- `--wsl-db-restarts`는 이 검증에 새로 준비한 `/tmp/model-a-xy-pg17/x/data`와 `y/data`의 인스턴스에서만 사용한다. 옵션을 생략하면 해당 두 재시작 케이스는 환경 미확인으로 기록된다.
+- `--case AC-08 --case AC-09`처럼 범위를 선택해도 각 경합 케이스는 새 실행 10회를 유지한다. AC-11의 X→Y 부분은 공통 지연 중계기를 사용해 첫 응답 10초 보류와 5초 호출 한도를 5회 적용한다.
+- 매 실행은 공통 fixture에서 S0만 준비한다. Repo와 대차는 실제 HTTP로 실행한다. DB 트리거와 통신 중계기를 사용한 추가 복구·회귀 검증은 별도 실행으로 기록한다.
+- `summary.json`에서 기능 판정과 증거를 포함한 최종 판정을 확인한다. 실행별 `events.jsonl`은 X·Y DB에서 내보낸 공통 이벤트 원본이고 `snapshots.jsonl`은 응답 원본이다. `http.jsonl`에는 인증 역할과 호출 ID만 남기며 인증 헤더 값은 기록하지 않는다. `faults.jsonl`은 주입 시점과 장애 진단을 기록한다.
+- 실제 처리 구간의 중첩이나 권리 소진→생성 인과관계가 증명되지 않으면 최종 판정은 `INCONCLUSIVE`다. 전체 결과에 `FAIL` 또는 `INCONCLUSIVE`가 있으면 자체 검증기는 비영 종료 코드를 반환한다. 이 자체 검증의 판정 범위는 X→Y 개발 검증이다.
+
+### 3단계 실제 PostgreSQL 검증 결과
+
+2026-11-21에 Windows API 두 개와 WSL의 PostgreSQL 17.12 테스트 인스턴스 두 개에서 새 실행 ID로 58회를 수행했다. 검증 종료 후 두 테스트 DB를 정상 종료했다.
+
+| 범위 | 실행 결과 |
+|---|---|
+| AC-03~05 거절 | **19 PASS**. 인증·권한·형식·업무 조건·업무 버전 거절과 업무 상태 보존을 확인했다. |
+| AC-06·07 중복·충돌 | **3 PASS**. X·Y의 동일 요청 재전송과 Y의 요청 ID 충돌 후 원래 결과 보존을 확인했다. |
+| AC-08·09 경합 | **20 PASS**. 같은 요청, 서로 다른 요청을 각각 10회 동시에 제출했다. 서버 이벤트로 처리 구간 중첩을 확인했고, 각 실행에서 Y 거래 한 건만 확정됐다. |
+| AC-11의 X→Y 부분 | **5 PASS**. Y 첫 확정 응답을 10초 동안 보류했으며, 원래 결과 조회와 동일 요청 재전송으로 S2를 확인했다. |
+| Model A 추가 복구 | **4 PASS, 1 INCONCLUSIVE**. 내부 응답 유실, 예약 후 Y API 재시작, X·Y PostgreSQL 재시작에서 동일 요청 복구를 확인했다. X API 재시작 케이스는 S2에 도달했지만 아래 증거 공백이 남았다. |
+| 관측 안정성 | **2 PASS**. X와 Y 각각에서 업무 커밋 후 이벤트 쓰기를 막고 API를 종료했다. 재시작 후 `snapshot_seq`가 이어졌고, 남아 있던 대기열에서 확정·반영 이벤트가 각각 한 번 기록됐다. |
+| 2단계 회귀 | **4 PASS**. 정상 S0→S1→S2, 예약·소진 직후 쓰기 실패에서의 재개, 예약 해제 후 최종 거부를 다시 확인했다. |
+
+`a-recovery-restart-X-api-39cb793857`에서는 B권리 소진 후 첫 확인 응답을 Y에 전달하지 않고 X를 재시작했다. 재시작 후 같은 요청이 정상 확정됐지만, 새 X 시계에서 전달된 응답을 이전 X 시계의 소진 이벤트와 연결할 공통 메시지 증거가 없었다. 기능 판정은 `PASS`, 최종 판정은 `INCONCLUSIVE`이며 배치는 종료 코드 1을 반환했다.
+
+로컬 증거는 `logs/stage3-20261121T070603593Z/`에 있다. `summary.json`은 58회 개별 판정과 실행 ID를 담는다. `manifest.json`은 구현·공통 입력·증거 파일의 SHA-256을 담는다. 이벤트 1,279개와 snapshot 248개를 공통 Schema로 다시 확인했고, 비밀값 검사를 거친 HTTP 기록 461개를 보존했다. 2단계 검증 기록은 그대로 유지했다. Docker Compose와 공통 인수 실행은 이번 배치 범위 밖이며 미실행이다.
+
+### X 재시작 인과관계 보완 재검증
+
+기존 `a-recovery-restart-X-api-39cb793857`는 재시작 전 X 시계의 순번 572에서 소진을 기록했다. 이후 Y가 받은 응답에는 새 X 시계에서 생성한 다른 HTTP `message_id`가 사용됐다. Y의 결과 조회와 snapshot은 단일 확정과 S2를 보여 주지만 이 둘만으로 이전 시계의 소진과 Y의 권리 생성을 연결할 수 없었다. 이전 배치의 판정과 증거는 보존했다.
+
+보완 후 PostgreSQL 17.12 대상 재검증은 **5 PASS**였다. `a-recovery-restart-X-api-4440b646a0`에서 기존 X 시계의 소진(순번 40)과 영속 확인 발행(41), Y 시계의 실제 확인 수신(22)과 권리 생성(23)을 같은 영속 `message_id=2c7094e388464222b2be4ed196084cad`로 연결했다. 새 X 시계가 전달한 HTTP 응답에는 별도 ID가 있었다. 대상 배치의 원본과 파일 해시는 `logs/stage3-causal-target-20261121T072029620Z/`에 보존했다.
+
+대상 검증이 끝난 뒤 같은 구현으로 기존 58개 케이스를 모두 재실행했다. **58 PASS, 0 INCONCLUSIVE, 0 FAIL**이었고 검증기는 종료 코드 0을 반환했다. 전체 배치의 `a-recovery-restart-X-api-03135df415`에서도 X 소진(순번 608)→발행(609)과 Y 수신(22)→권리 생성(23)을 영속 `message_id=f7b1b9f28bd44d499bcdf84af25b9ee6`로 연결했다. 서로 다른 요청과 같은 요청의 경합을 각각 10회 다시 수행해 모든 실행에서 서버 처리 중첩과 단일 거래 확정을 확인했다.
+
+전체 회귀 배치는 `logs/stage3-causal-full-20261121T072029620Z/`에 보존했다. 이벤트 원본 1,412개와 snapshot 248개를 공통 Schema로 확인했고, 인증값을 제외한 HTTP 기록 448개를 검증했다. 두 배치 모두 `summary.json`에 판정과 실행 ID, `manifest.json`에 구현·공통 입력·원본 증거의 SHA-256이 있다. 두 임시 PostgreSQL 서버는 정상 종료했다. 이 결과는 X→Y 자체 검증에 해당하며 Docker Compose 및 공통 인수 실행은 미실행이다.
+
+[3단계 검증 요약 JSON](verification/xy-stage3-postgresql-2026-11-21.json)에서 전체 58건의 판정과 검증 환경, 원본 요약·manifest의 SHA-256을 확인할 수 있다. 원본 로그는 로컬에 보존하며, 기록된 해시를 로그와 대조하려면 로컬 원본이 필요하다.
 
 ## 2단계 검증 결과
 

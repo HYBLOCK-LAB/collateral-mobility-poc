@@ -4,10 +4,10 @@ from threading import Lock
 from uuid import uuid4
 
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, ForeignKey, ForeignKeyConstraint, Index,
+    BigInteger, Boolean, CheckConstraint, Column, ForeignKey, ForeignKeyConstraint, Index,
     Integer, MetaData, String, Table, UniqueConstraint, select,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, insert
 
 metadata = MetaData()
 runs = Table("runs", metadata, Column("run_id", String(128), primary_key=True))
@@ -90,6 +90,16 @@ requests = Table(
 )
 Index("one_request_per_reserved_record", requests.c.run_id, requests.c.record_id, unique=True,
       postgresql_where=requests.c.result["outcome"].astext.in_(("PENDING", "COMMITTED")))
+commit_observations = Table(
+    "commit_observations", metadata, run_key(), Column("actor", String(8), primary_key=True),
+    Column("request_id", String(128), primary_key=True),
+    ForeignKeyConstraint(("run_id", "actor", "request_id"),
+                         ("requests.run_id", "requests.actor", "requests.request_id")),
+)
+snapshot_counters = Table(
+    "snapshot_counters", metadata, run_key(), Column("sequence", BigInteger, nullable=False),
+    CheckConstraint("sequence > 0"),
+)
 transfers = Table(
     "transfers", metadata, run_key(), Column("request_id", String(128), primary_key=True),
     Column("bundle_id", String(128), nullable=False), Column("record_id", String(128), nullable=False),
@@ -102,6 +112,14 @@ Index("one_reservation_per_bundle", transfers.c.run_id, transfers.c.bundle_id, u
       postgresql_where=transfers.c.state == "RESERVED")
 Index("one_transfer_per_loan", transfers.c.run_id, transfers.c.record_id, unique=True,
       postgresql_where=transfers.c.state.in_(("RESERVED", "CONSUMED")))
+transfer_confirmations = Table(
+    "transfer_confirmations", metadata, run_key(),
+    Column("request_id", String(128), primary_key=True),
+    Column("message_id", String(32), nullable=False),
+    Column("source_record_id", String(128), nullable=False),
+    ForeignKeyConstraint(("run_id", "request_id"), ("transfers.run_id", "transfers.request_id")),
+    UniqueConstraint("run_id", "message_id"),
+)
 events = Table(
     "events", metadata, run_key(), Column("event_id", String(128), primary_key=True),
     Column("payload", JSONB, nullable=False),
@@ -125,6 +143,17 @@ def change(connection, table, keys, **values):
 
 def require_run(connection, run_id):
     return one(connection, runs, run_id=run_id) is not None
+
+
+def next_snapshot_sequence(connection, run_id):
+    return connection.execute(
+        insert(snapshot_counters).values(run_id=run_id, sequence=1)
+        .on_conflict_do_update(
+            index_elements=[snapshot_counters.c.run_id],
+            set_={"sequence": snapshot_counters.c.sequence + 1},
+        )
+        .returning(snapshot_counters.c.sequence)
+    ).scalar_one()
 
 
 def right_id(bundle_id, version):

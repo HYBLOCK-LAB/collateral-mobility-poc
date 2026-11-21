@@ -1,6 +1,5 @@
 import asyncio
 import hmac
-import itertools
 import json
 import logging
 import os
@@ -51,7 +50,6 @@ workflow = Workflow(engine, platform, os.getenv("MODEL_A_X_URL"), internal_token
 schema_dir = Path(os.getenv("MODEL_A_SCHEMA_DIR", Path(__file__).parent / "schemas"))
 command_schema = Draft202012Validator(json.loads((schema_dir / "command.schema.json").read_text(encoding="utf-8")))
 command_type, submitting_actor = (REPO, "BANK_A") if platform == "X" else (LOAN, "BANK_B")
-snapshot_sequence = itertools.count(1)
 identifier = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
@@ -71,13 +69,12 @@ async def recovery_loop(stopped):
 async def lifespan(_app):
     await asyncio.to_thread(db.metadata.create_all, engine)
     stopped = asyncio.Event()
-    recovery = asyncio.create_task(recovery_loop(stopped)) if platform == "Y" else None
+    recovery = asyncio.create_task(recovery_loop(stopped))
     try:
         yield
     finally:
         stopped.set()
-        if recovery:
-            await recovery
+        await recovery
         workflow.peer.close()
         engine.dispose()
 
@@ -191,9 +188,9 @@ def submit(request: Request, run_id: str, body: Any = Body(None)):
     if reply["outcome"] == "PENDING":
         replayed = reply["replayed"]
         reply = dict(workflow.advance(keys_for(context)), replayed=replayed)
+    if reply["outcome"] == "COMMITTED":
+        workflow.publish_commit_observation(keys_for(context))
     with engine.begin() as connection:
-        if platform == "X" and reply["outcome"] == "COMMITTED" and not reply["replayed"]:
-            workflow.applied(connection, context, reply)
         workflow.log.write(connection, context, "COMMAND_FINISHED", outcome=reply["outcome"],
                            error_code=reply["error"]["code"] if reply["error"] else None)
     return JSONResponse(reply, status_code=202 if reply["outcome"] == "PENDING" else 200)
@@ -227,8 +224,8 @@ def snapshot(request: Request, run_id: str):
         agreement_ids = {row["contract_id"]: row["agreement_id"] for row in contracts}
         pending = [row for row in db.rows(connection, db.requests, run_id=run_id) if row["phase"] != "DONE"]
         pending.extend(db.rows(connection, db.transfers, run_id=run_id, state="RESERVED"))
-        return {
-            "run_id": run_id, "platform": platform, "snapshot_seq": next(snapshot_sequence),
+        view = {
+            "run_id": run_id, "platform": platform,
             "bundles": [db.public_bundle(row) for row in db.rows(connection, db.bundles, run_id=run_id)],
             "rights": [db.public_right(row) for row in db.rows(connection, db.rights, run_id=run_id)],
             "contracts": [{**{key: row[key] for key in ("contract_id", "agreement_id", "bundle_id", "parties")},
@@ -242,6 +239,9 @@ def snapshot(request: Request, run_id: str):
             "pending_operations": [{"request_id": row["request_id"], "bundle_id": row["bundle_id"],
                                     "kind": "PROCESSING", "blocks_use": True} for row in pending],
         }
+    with engine.begin() as connection:
+        view["snapshot_seq"] = db.next_snapshot_sequence(connection, run_id)
+    return view
 
 
 if platform == "Y":
