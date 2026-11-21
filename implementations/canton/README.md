@@ -79,13 +79,13 @@ Party 구성은 구현 시 다음 열로 작성합니다. 실제 키·토큰은 
 
 | 순서 | 반드시 기록할 내용 | 현재 상태 |
 |---|---|---|
-| 설치 | SDK·런타임·필수 의존성·환경 설정 | `brew install openjdk@21 postgresql@17 python@3.12` → `cp env.example .env`(경로만 조정) → `scripts/install-toolchain.sh` → `scripts/adapter.sh setup`(`.venv` 생성) |
+| 설치 | SDK·런타임·필수 의존성·환경 설정 | `brew install openjdk@21 postgresql@17 python@3.12` → `cp env.example .env`(경로만 조정) → `scripts/install-toolchain.sh` → `scripts/adapter.sh setup`(`.venv` 생성) → `scripts/adapter.sh tokens`(자격 토큰 생성, 아래 자격 설정). 모두 처음 한 번만 실행합니다 |
 | 노드 기동 | S1·Participant·플랫폼 서비스의 순서·명령·주소 | `scripts/db.sh init`(처음 한 번) → `scripts/db.sh start` → `scripts/canton.sh start`(부트스트랩까지 대기, 약 60초) → `scripts/adapter.sh start`(X `http://127.0.0.1:8201`, Y `http://127.0.0.1:8202`) |
 | 계약 준비 | 빌드·패키지·Party·권한·필요 연결 준비 | Party와 호스팅은 Canton 부트스트랩이 만듭니다. `adapter.sh start`가 DAR를 빌드하고, 각 어댑터가 기동할 때 DAR를 올린 뒤 예열 거래를 두 번 실행합니다. 업무 계약은 2단계 |
-| 자격 설정 | 기관·관측기와 Party·API 권한 연결. 비밀값 제외 | `scripts/adapter.sh tokens`가 `POC_BANK_A_TOKEN`·`POC_BANK_B_TOKEN`·`POC_BANK_C_TOKEN`·`POC_OBSERVER_TOKEN`을 `$CANTON_STATE_DIR/secrets/tokens.env`(권한 600)에 한 번 만듭니다. `scripts/env.sh`를 source하면 환경변수로 들어갑니다. 실행기 설정의 `auth_env`와 이름이 같습니다 |
+| 자격 설정 | 기관·관측기와 Party·API 권한 연결. 비밀값 제외 | 어댑터를 처음 기동하기 전에 실행합니다(설치 순서의 마지막). 토큰 파일이 없으면 `scripts/adapter.sh start`가 기동하지 않고 멈춥니다. `scripts/adapter.sh tokens`가 `POC_BANK_A_TOKEN`·`POC_BANK_B_TOKEN`·`POC_BANK_C_TOKEN`·`POC_OBSERVER_TOKEN`을 `$CANTON_STATE_DIR/secrets/tokens.env`(권한 600)에 한 번 만듭니다. `scripts/env.sh`를 source하면 환경변수로 들어갑니다. 실행기 설정의 `auth_env`와 이름이 같습니다 |
 | 새 데이터 준비 | 새 run_id와 fixture 경로로 초기 자산·합의 준비 | 준비 프로그램은 총괄이 작성합니다. 계약 생성 방법 초안은 §3 끝에 있습니다 |
 | 기능 확인 | 실제 Repo·증권대차·배정·readiness·결과 조회·snapshot | 2단계 이후 |
-| 자체 테스트 | 실제 Canton 기능·권한·경합·의무 유지 검증 명령 | `. scripts/env.sh` 뒤에 `python3.12 -I selftest/stage1_probe.py`(Participant 간 가시성·제출 권한·경합, 확인용 DAR `daml/stage1-probe` 필요)와 `.venv/bin/python -I selftest/adapter_selftest.py`(어댑터 인증·권한·오류 응답·이벤트 로그). 보고서는 `logs/stage1/`, `logs/adapter-selftest/` |
+| 자체 테스트 | 실제 Canton 기능·권한·경합·의무 유지 검증 명령 | `. scripts/env.sh` → `(cd daml/stage1-probe && dpm build)`(확인용 DAR 빌드. 저장소에는 DAR가 없습니다) → `python3.12 -I selftest/stage1_probe.py`(Participant 간 가시성·제출 권한·경합)와 `.venv/bin/python -I selftest/adapter_selftest.py`(어댑터 인증·권한·오류 응답·이벤트 로그). 보고서는 `logs/stage1/`, `logs/adapter-selftest/` |
 | 공통 테스트 | 총괄 제공 실행기 연결·실행 결과 | 2단계 이후. 1단계 자체 테스트는 응답 판정에 실행기의 `tests/conformance/checks.py`를 그대로 씁니다 |
 | 로그 확인 | 내부 확정·로컬 반영·업무 ID·Contract ID·시계 연결 | 어댑터 이벤트 `logs/<run_id>/events.jsonl`, 어댑터 출력 `$CANTON_STATE_DIR/logs/adapter-<P>.out`, 노드 로그 `$CANTON_STATE_DIR/logs/canton.log`. 업무 ID와 Contract ID의 연결은 2단계 |
 | 종료·정리 | 노드 종료·데이터 정리·주의사항 | `scripts/adapter.sh stop` → `scripts/canton.sh stop` → `scripts/db.sh stop`. `scripts/db.sh wipe --yes`는 노드 DB를 지우고 다시 만듭니다. 되돌릴 수 없고, 다음 기동 때 Party 식별자가 바뀝니다 |
