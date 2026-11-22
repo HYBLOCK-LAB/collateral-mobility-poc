@@ -538,4 +538,4 @@ PR #5 `1d369e1c6931d255c1baa4715566cec43074d56d`의 `collateral` 0.3.0을 기준
 - PR #4 `285dfb09900aeede8b0398ff218d00fd75c04e73` 구현과 수정된 실행기·수집기를 별도 Compose 프로젝트에서 조합했다. 적재·수집 컨테이너를 분리하고 수집 컨테이너에 읽기 전용 DSN만 있음을 확인했다. 준비 확인 및 공통 X→Y **50건 PASS / 0 FAIL / 0 INCONCLUSIVE**, 종료 코드 0, `final_handoff_eligible=false`였다.
 - 증거: `results/model-a-collector-review-20261122T151008/verification.json`, 소스 복사본·`source-sha256.json`·검증 드라이버·기동/종료 로그, 하위 `batches/batch-f28f5267a3964d029699a8c8d76982f0/`. 이번 프로젝트 자원만 정리했고 원래 데이터는 사용·변경하지 않았다.
 
-이 결과는 A의 X→Y 회귀 검증이다. B1 실제 연결·Z·전체 최종 인수·성능 실험을 대신하지 않는다. 현재 코드·문서와 맞는 기준 버전 보존 및 공유는 별도 절차로 진행한다.
+이 결과는 A의 X→Y 회귀 검증이다. B1 실제 연결·Z·전체 최종 인수·성능 실험을 대신하지 않는다. 현재 코드·문서와 맞는 기준 버전 보존 및 공유는 [Model A X→Y 기준 기록](baselines/model-a-xy-20261122.md)의 절차로 진행한다.
