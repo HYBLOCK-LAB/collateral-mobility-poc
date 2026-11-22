@@ -19,6 +19,7 @@ class Unsettled(CheckError):
 def collect_once(run_id, output):
     valid_run(run_id)
     events = []
+    unsettled = False
     for platform in ("X", "Y"):
         with connect(platform, "EVIDENCE") as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -30,7 +31,7 @@ def collect_once(run_id, output):
                 # Table and condition come only from the fixed list above.
                 if connection.execute(f"SELECT 1 FROM {table} WHERE run_id = %s AND {condition} LIMIT 1",
                                       (run_id,)).fetchone():
-                    raise Unsettled("implementation has unsettled operations/observations")
+                    unsettled = True
             rows = connection.execute(
                 "SELECT payload FROM events WHERE run_id = %s "
                 "ORDER BY payload->>'producer_id', payload->>'clock_id', (payload->>'sequence')::bigint",
@@ -54,6 +55,9 @@ def collect_once(run_id, output):
     finally:
         if pending is not None:
             pending.unlink(missing_ok=True)
+    if unsettled:
+        # Preserve the observed history for diagnostics without accepting it as settled evidence.
+        raise Unsettled("implementation has unsettled operations/observations; diagnostic events exported")
     return len(events)
 
 

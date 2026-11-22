@@ -9,12 +9,46 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from checks import ROOT, EvidenceMissing, read_json
+from checks import ROOT, CheckError, EvidenceMissing, read_json
 from runner import execute_case, experiment_batch, validated_for_experiment
 from test_runner import PREPARE, snapshot
 
 
 class BatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_scenario_still_exports_history_and_keeps_original_reason(self):
+        for error, verdict in ((CheckError("original business failure"), "FAIL"),
+                               (EvidenceMissing("original observation failure"), "INCONCLUSIVE"),
+                               (RuntimeError("unexpected failure"), "INCONCLUSIVE")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config = read_json(ROOT / "tests/conformance/config.example.json")
+                config["prepare_command"] = [sys.executable, "-c", PREPARE]
+                config_path = root / "config.json"
+                config_path.write_text(json.dumps(config))
+                args = Namespace(config=str(config_path), observer_auth="bearer", platforms=["X", "Y"],
+                                 output=temp, collect_command=["diagnostic-collector"])
+                case = {"test_id": "AC-01", "variant": "normal", "fixture": "f0-normal", "repeat": 1}
+
+                async def snapshots(config, platforms, run_id, *args):
+                    return {p: snapshot(run_id, p) for p in platforms}
+
+                def history(execution):
+                    (execution.path / "evidence/diagnostic.json").write_text('{}')
+                    raise EvidenceMissing("incomplete diagnostic history")
+
+                with patch.dict(os.environ, {"POC_OBSERVER_TOKEN": "self-test-credential"}), patch(
+                        "runner.collect_snapshots", snapshots), patch("runner.Execution.scenario", new=AsyncMock(side_effect=error)), patch(
+                        "runner.export_implementation_events", side_effect=EvidenceMissing("collector unsettled")) as export, patch(
+                        "runner.collect_history", side_effect=history) as archive:
+                    row = await execute_case(args, config, case, root, 0)
+                export.assert_called_once()
+                archive.assert_called_once()
+                self.assertEqual(row["verdict"], verdict)
+                self.assertEqual(row["reason"], str(error) if isinstance(error, CheckError) else "RuntimeError")
+                self.assertFalse(row["evidence_complete"])
+                self.assertIn("evidence/diagnostic.json", row["evidence_sha256"])
+                self.assertEqual(len(row["diagnostic_errors"]), 2)
+
     async def test_prepare_and_body_are_connected_without_nested_event_loops(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
