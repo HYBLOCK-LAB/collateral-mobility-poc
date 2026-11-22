@@ -1,4 +1,4 @@
-"""Coordinator S0 loader for PR #5 collateral 0.2.0; never submits business choices."""
+"""Coordinator S0 loader for PR #5 collateral 0.3.0; never submits business choices."""
 
 import argparse
 import hashlib
@@ -33,6 +33,7 @@ def commands(run_id, fixture, parties):
             "bundle": {"bundleId": b["bundle_id"], "securityId": b["security_id"],
                        "quantity": b["quantity"], "referenceValue": b["reference_value"]},
             "rightId": b["bundle_id"] + ":right:0", "holder": parties[b["initial_holder"]],
+            "cosigner": parties["BANK_B"],
             "createdVersion": "0", "status": "AVAILABLE", "allowedCommands": ["CONFIRM_REPO"],
             "predecessorRightId": None, "sourceRecordId": None,
         })

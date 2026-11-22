@@ -39,6 +39,10 @@ class CantonConnectionTests(unittest.TestCase):
                 "packageName": "collateral", "createArgument": {"runId": "run-test"}
             }}}}] if self.exists else []
             return httpx.Response(200, json={"activeContracts": rows})
+        for command in body["commands"]["commands"]:
+            create = command["CreateCommand"]
+            if create["templateId"] == "#collateral:Collateral.Right:UseRight":
+                self.assertEqual(create["createArguments"]["cosigner"], PARTIES["BANK_B"])
         self.creates.append((request.url.port, body["commands"]))
         if self.fail_y and request.url.port == 4523:
             raise httpx.ReadTimeout("uncertain submission", request=request)
@@ -83,6 +87,9 @@ class CantonConnectionTests(unittest.TestCase):
                          for group in mapped.values() for c in group}
             repo = next(a for a in fixture["agreements"] if a["type"] == "REPO")
             loan = next(a for a in fixture["agreements"] if a["type"] == "LOAN")
+            right = arguments['#collateral:Collateral.Right:UseRight']
+            self.assertEqual(right['cosigner'], PARTIES[repo['buyer']])
+            self.assertNotEqual(right['holder'], right['cosigner'])
             self.assertEqual(arguments['#collateral:Collateral.Agreement:RepoAgreement']['reuseAllowed'],repo['reuse_allowed'])
             result = arguments['#collateral:Collateral.Agreement:LoanAgreement']
             self.assertEqual(result['ccpUseAllowed'],loan['ccp_use_allowed'])
