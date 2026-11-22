@@ -192,6 +192,8 @@ class XYSelftest:
             },
             "rightId": bundle["bundle_id"] + ":right:0",
             "holder": p[bundle["initial_holder"]],
+            # The initial right is cosigned by the Repo counterparty (README §3).
+            "cosigner": p[repo["buyer"]],
             "createdVersion": "0",
             "status": "AVAILABLE",
             "allowedCommands": ["CONFIRM_REPO"],

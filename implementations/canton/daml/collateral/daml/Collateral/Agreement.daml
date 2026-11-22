@@ -21,7 +21,8 @@ data Confirmed = Confirmed
   deriving (Eq, Show)
 
 -- Checks the right a confirmation uses, consumes it and creates the next
--- right for the counterparty. Returns the consumed and the next right.
+-- right for the counterparty, cosigned by the party passing it on. Returns the
+-- consumed and the next right.
 useRight
   : Text -> Text -> Party -> Party -> UseCommand -> Int -> ContractId UseRight
   -> Optional UseCommand -> Text -> Update (UseRight, ContractId UseRight, ContractId UseRight)
@@ -33,13 +34,14 @@ useRight runId bundleId user counterparty command expectedVersion rightCid nextC
   assertMsg "the right is not available" (right.status == AVAILABLE)
   assertMsg "the bundle version is not the expected one" (right.createdVersion == expectedVersion)
   assertMsg "the right does not permit this command" (command `elem` right.allowedCommands)
-  consumed <- exercise rightCid Consume
+  consumed <- exercise rightCid Consume with nextHolder = counterparty
   let version = right.createdVersion + 1
   next <- create UseRight with
     runId
     bundle = right.bundle
     rightId = bundleId <> ":right:" <> show version
     holder = counterparty
+    cosigner = user
     createdVersion = version
     status = AVAILABLE
     allowedCommands = optional [] (\c -> [c]) nextCommand
@@ -114,6 +116,10 @@ template LoanAgreement
       do
         assertMsg "the separate loan collateral is not eligible"
           (collateral.provided && collateral.conditionsMet)
+        -- The right a loan uses comes from the Repo, cosigned by the Repo
+        -- seller; a right the borrower cosigned did not.
+        right <- fetch rightCid
+        assertMsg "the right is cosigned by the borrower" (right.cosigner /= borrower)
         (right, consumed, next) <- useRight runId bundleId lender borrower CONFIRM_LOAN
           expectedVersion rightCid (if ccpUseAllowed then Some ALLOCATE_MARGIN else None) loanId
         trade <- create TradeContract with

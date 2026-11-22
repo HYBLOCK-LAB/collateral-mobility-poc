@@ -2,7 +2,7 @@
 # (stage 1) and the X→Y business templates (stage 2, README §3).
 sdk-version: 3.7.1
 name: collateral
-version: 0.2.0
+version: 0.3.0
 source: daml
 dependencies:
   - daml-prim

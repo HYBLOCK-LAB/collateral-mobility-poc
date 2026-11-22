@@ -63,7 +63,7 @@ from jsonschema import Draft202012Validator
 
 IMPL_DIR = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = IMPL_DIR.parent.parent / "shared/schemas"
-DAR = IMPL_DIR / "daml/collateral/.daml/dist/collateral-0.2.0.dar"
+DAR = IMPL_DIR / "daml/collateral/.daml/dist/collateral-0.3.0.dar"
 PACKAGE = "collateral"
 WARMUP_TEMPLATE = f"#{PACKAGE}:Collateral.Warmup:Warmup"
 # Business templates by module:entity (README §3). The ledger reports a
@@ -263,7 +263,7 @@ class Verdict(NamedTuple):
 
     code: str | None
     message: str = ""
-    absent: bool = False  # no right of the bundle visible at all
+    absent: bool = False  # the actor holds no right of the bundle (yet)
     agreement: Active | None = None
     right: Active | None = None
 
@@ -1038,7 +1038,9 @@ class Adapter:
     ) -> Verdict:
         """Check a new request against the run's state in the order of the
         confirmation choice (Collateral.Agreement). The choice checks the same
-        conditions again inside the transaction."""
+        conditions again inside the transaction. ConfirmLoan's cosigner check
+        is left to the ledger: a right the borrower cosigned only comes from a
+        joint Ledger API submission, and its refusal is answered 503 (README §3)."""
         confirmation = CONFIRMATIONS[command["command_type"]]
         payload, bundle_id = command["payload"], command["bundle_id"]
         agreements = [

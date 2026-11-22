@@ -1,6 +1,9 @@
 -- The use right of one bundle (README §3). Each business version has its own
 -- right contract: {bundle_id}:right:{version}. A confirmed transaction
 -- consumes the current right and creates the next one for the counterparty.
+-- The holder and the cosigner, the party that passed the right on, both sign,
+-- so neither creates, archives or consumes a right alone (README §3 lists the
+-- joint paths this leaves).
 module Collateral.Right where
 
 import Collateral.Types
@@ -11,21 +14,27 @@ template UseRight
     bundle : Bundle
     rightId : Text
     holder : Party
+    cosigner : Party
     createdVersion : Int
     status : RightStatus
     allowedCommands : [UseCommand]
     predecessorRightId : Optional Text
     sourceRecordId : Optional Text
   where
-    -- The holder alone signs (README §3 lists the limit this leaves).
-    signatory holder
-    ensure createdVersion >= 0 && (status == AVAILABLE || null allowedCommands)
+    signatory holder, cosigner
+    ensure holder /= cosigner && createdVersion >= 0 && (status == AVAILABLE || null allowedCommands)
 
     -- Replaces the right with its consumed form instead of only archiving it,
     -- so the consumed right stays readable in the snapshot (interface §8.2).
     -- A second consumption of the same right fails: the contract is gone.
+    -- The next holder authorizes too, so the holder cannot consume the right
+    -- alone; a confirmation choice carries the counterparty's authority from
+    -- its signature on the agreement.
     choice Consume : ContractId UseRight
-      controller holder
+      with
+        nextHolder : Party
+      controller holder, nextHolder
       do
+        assertMsg "the next holder is the holder" (nextHolder /= holder)
         assertMsg "the right is not available" (status == AVAILABLE)
         create this with status = CONSUMED; allowedCommands = []
