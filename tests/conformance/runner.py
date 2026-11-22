@@ -27,6 +27,7 @@ RESULT_SECONDS = .05
 RETRY_SECONDS = 1
 OBSERVE_SECONDS = 60
 FAULT_SECONDS = 10
+CREDENTIAL_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "DSN")
 
 
 def environment_info():
@@ -42,8 +43,7 @@ def digest(path):
 def secret_values(config=None):
     names = set(config.get("auth_env", {}).values()) if isinstance(config, dict) and isinstance(
         config.get("auth_env"), dict) else set()
-    names.update(k for k in os.environ if any(s in k.upper() for s in
-                                            ("TOKEN", "SECRET", "PASSWORD", "API_KEY")))
+    names.update(k for k in os.environ if any(s in k.upper() for s in CREDENTIAL_MARKERS))
     return sorted({os.environ[k] for k in names if isinstance(k, str) and os.environ.get(k)},
                   key=len, reverse=True)
 
@@ -205,7 +205,8 @@ class Execution:
         self.test_id, self.platforms = test_id, platforms
         self.secrets = secret_values(config)
         self.clock = "observer-" + run_id
-        self.events, self.results, self.previous = [], [], []
+        # Preparation already verified S0; an untouched peer may still expose it.
+        self.events, self.results, self.previous = [], [], [expected_state(fixture, 0)]
         self.preacceptance_errors = []
         self.race_requests = []
         self.reassigned = False
@@ -726,7 +727,8 @@ def collect_history(execution):
     write_json(execution.path / "evidence/implementation-events.json", {"source": str(source),
                "sha256": hashlib.sha256(original).hexdigest(), "body": text}, execution.secrets)
     events = [parse_json(line) for line in text.splitlines() if line.strip()]
-    if not events:
+    # Readiness-only and preacceptance refusals can produce no business events.
+    if not events and (execution.test_id not in ("AC-02", "AC-03") or execution.results):
         raise EvidenceMissing("implementation event log empty")
     for event in events:
         validate(event, "event.schema.json")
@@ -735,6 +737,29 @@ def collect_history(execution):
             raise CheckError("implementation event identity mismatch")
     history_check(events, execution.results, execution.race_requests)
     return events
+
+
+def export_implementation_events(command, execution):
+    """Optional local collector; business processing has already finished."""
+    if not command:
+        return
+    output = (ROOT / execution.config["evidence_dir"] / execution.run_id / "events.jsonl").resolve()
+    auth_names = set(execution.config.get("auth_env", {}).values())
+    # The collector needs read-only DB credentials, never seed DSNs or API tokens.
+    environment = {k: v for k, v in os.environ.items()
+                   if k in ("MODEL_A_X_EVIDENCE_DSN", "MODEL_A_Y_EVIDENCE_DSN")
+                   or (k not in auth_names and not any(s in k.upper() for s in CREDENTIAL_MARKERS))}
+    try:
+        completed = subprocess.run(
+            [*command, "--run-id", execution.run_id, "--output", str(output)],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, env=environment)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvidenceMissing("implementation collector " + type(error).__name__) from None
+    write_json(execution.path / "evidence/collection.json", {
+        "command": command, "returncode": completed.returncode, "stdout": completed.stdout,
+        "stderr": completed.stderr}, execution.secrets)
+    if completed.returncode:
+        raise EvidenceMissing("implementation collector failed; see evidence/collection.json")
 
 
 async def execute_case(args, config, case, batch, index):
@@ -756,23 +781,41 @@ async def execute_case(args, config, case, batch, index):
     execution = Execution(config, read_json(prepare_args.fixture), path, run_id,
                           case["test_id"], args.platforms)
     row["body_started"] = True
+    row["functional_verdict"] = "INCONCLUSIVE"
     try:
         if case.get("measured_flow"):
             await execution.measured_flow()
         else:
             await execution.scenario(case["variant"])
         row["functional_verdict"] = "PASS"
-        collect_history(execution)
-        if execution.reassignment and execution.reassignment["total_preparation_ms"] is None:
-            raise EvidenceMissing("overall reassignment timing evidence is not comparable")
-        row.update(verdict="PASS", evidence_complete=True)
     except EvidenceMissing as error:
         row["reason"] = str(error)
     except CheckError as error:
-        row.update(verdict="FAIL", reason=str(error))
+        row.update(verdict="FAIL", functional_verdict="FAIL", reason=str(error))
     except Exception as error:
         row["reason"] = type(error).__name__
     finally:
+        evidence_errors = []
+        try:
+            await asyncio.to_thread(export_implementation_events, getattr(args, "collect_command", None), execution)
+        except Exception as error:
+            evidence_errors.append(error)
+        try:
+            collect_history(execution)
+            if execution.reassignment and execution.reassignment["total_preparation_ms"] is None:
+                raise EvidenceMissing("overall reassignment timing evidence is not comparable")
+        except Exception as error:
+            evidence_errors.append(error)
+        if evidence_errors:
+            row["diagnostic_errors"] = [str(e) if isinstance(e, CheckError) else type(e).__name__
+                                        for e in evidence_errors]
+        if row["functional_verdict"] == "PASS":
+            if evidence_errors:
+                error = evidence_errors[0]
+                row.update(verdict="FAIL" if isinstance(error, CheckError) and not isinstance(error, EvidenceMissing)
+                           else "INCONCLUSIVE", reason=row["diagnostic_errors"][0])
+            else:
+                row.update(verdict="PASS", evidence_complete=True)
         await execution.client.aclose()
         execution.event("RUN_FINISHED", verdict=row["verdict"])
         row["logical_results"] = [{"request_id": c["request_id"], "outcome": r["outcome"],
@@ -1102,6 +1145,8 @@ def main():
     check.add_argument("--final", action="store_true")
     check.add_argument("--observer-auth", choices=("bearer",), required=True)
     check.add_argument("--output", default=str(ROOT / "results"))
+    check.add_argument("--collect-command", nargs="+",
+                       help="Local read-only event collector argv; receives --run-id and --output after each case")
     check.add_argument("--prerequisite-batch", action="append", default=[])
     experiment = commands.add_parser("experiment", help="Fixed attempts; never top up failures")
     experiment.add_argument("--config", nargs="+", required=True)
