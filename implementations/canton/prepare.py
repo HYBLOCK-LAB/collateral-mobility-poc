@@ -128,6 +128,12 @@ def prepare(run_id, fixture, state, client):
             if not isinstance(reply.get("transaction"), dict):
                 raise CheckError("Ledger API did not return the preparation transaction")
             submitted.append(p)
+        # Read-only runs emit no business events; initialize their real log without inventing any.
+        evidence = Path(os.environ.get("CANTON_EVIDENCE_DIR") or ROOT / "implementations/canton/logs")
+        log = evidence / run_id / "events.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8"):
+            pass
     except Exception:
         print(json.dumps({"run_id": run_id, "acknowledged_participants": submitted,
                           "status": "FAILED_OR_UNKNOWN", "claim_preserved": True}), file=sys.stderr)
