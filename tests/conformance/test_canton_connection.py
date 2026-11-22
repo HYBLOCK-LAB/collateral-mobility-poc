@@ -3,13 +3,17 @@
 import copy
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 
 from checks import ROOT, CheckError, read_json
+from runner import collect_history
 
 spec = importlib.util.spec_from_file_location("canton_prepare", ROOT / "implementations/canton/prepare.py")
 loader = importlib.util.module_from_spec(spec)
@@ -22,6 +26,10 @@ class CantonConnectionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)
+        self.evidence = self.state / "events"
+        environment = patch.dict(os.environ, {"CANTON_EVIDENCE_DIR": str(self.evidence)})
+        environment.start()
+        self.addCleanup(environment.stop)
         (self.state / "ids.json").write_text(json.dumps({
             "parties": PARTIES,
             "json_api": {"P_X": "http://127.0.0.1:4513", "P_Y": "http://127.0.0.1:4523"},
@@ -59,6 +67,23 @@ class CantonConnectionTests(unittest.TestCase):
         self.assertEqual(len(y["commands"]), 1)
         self.assertTrue(all(set(c) == {"CreateCommand"} for body in (x,y) for c in body["commands"]))
         self.assertTrue((self.state / "conformance-preparations/run-test.json").exists())
+        event_file = self.evidence / "run-test/events.jsonl"
+        self.assertEqual(event_file.read_bytes(), b"")
+        archive = self.state / "evidence"
+        archive.mkdir()
+        execution = SimpleNamespace(config={"evidence_dir": str(self.evidence), "model": "B1"},
+                                    run_id="run-test", path=self.state, secrets=[], test_id="AC-02",
+                                    results=[], race_requests=[])
+        self.assertEqual(collect_history(execution), [])
+        self.assertTrue((archive / "implementation-events.json").exists())
+
+    def test_preparation_does_not_truncate_existing_history(self):
+        event_file = self.evidence / "run-test/events.jsonl"
+        event_file.parent.mkdir(parents=True)
+        event_file.write_bytes(b"preserved existing history\n")
+        with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
+            loader.prepare("run-test", self.fixture, self.state, client)
+        self.assertEqual(event_file.read_bytes(), b"preserved existing history\n")
 
     def test_existing_ledger_run_is_never_submitted(self):
         self.exists = True
@@ -72,6 +97,7 @@ class CantonConnectionTests(unittest.TestCase):
         with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
             with self.assertRaises(httpx.ReadTimeout):
                 loader.prepare("run-test", self.fixture, self.state, client)
+            self.assertFalse((self.evidence / "run-test/events.jsonl").exists())
             self.fail_y = False
             with self.assertRaisesRegex(CheckError, "RUN_ALREADY_EXISTS"):
                 loader.prepare("run-test", self.fixture, self.state, client)
