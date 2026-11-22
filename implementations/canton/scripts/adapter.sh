@@ -16,7 +16,7 @@ set -euo pipefail
 PY="$CANTON_IMPL_DIR/.venv/bin/python"
 SERVER="$CANTON_IMPL_DIR/adapter/server.py"
 PKG="$CANTON_IMPL_DIR/daml/collateral"
-DAR="$PKG/.daml/dist/collateral-0.1.0.dar"
+DAR="$PKG/.daml/dist/collateral-0.3.0.dar"
 TOKENS="$CANTON_STATE_DIR/secrets/tokens.env"
 LOGDIR="$CANTON_STATE_DIR/logs"
 PLATFORMS="X Y"

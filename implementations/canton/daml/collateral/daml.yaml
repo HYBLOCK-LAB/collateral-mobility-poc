@@ -1,8 +1,8 @@
-# Business package of the Canton models (B1, later B2). Stage 1 holds only the
-# warm-up template; the stage 2 business templates are added to this package.
+# Business package of the Canton models (B1, later B2): the warm-up template
+# (stage 1) and the X→Y business templates (stage 2, README §3).
 sdk-version: 3.7.1
 name: collateral
-version: 0.1.0
+version: 0.3.0
 source: daml
 dependencies:
   - daml-prim

@@ -4,6 +4,7 @@
 #   db.sh init                 create the cluster, role and node databases (once)
 #   db.sh start | stop | status
 #   db.sh wipe --yes           drop and recreate the node databases (re-bootstrap)
+#                              and remove the adapters' rejection records
 #   db.sh psql [args...]       psql as the Canton role
 #
 # The cluster lives in $CANTON_STATE_DIR/postgres, listens on 127.0.0.1 only,
@@ -97,12 +98,17 @@ cmd_wipe() {
   if pgrep -f "canton.*$CANTON_IMPL_DIR/canton/" >/dev/null; then
     die "Canton is still running (scripts/canton.sh stop)"
   fi
+  if pgrep -f -- "$CANTON_IMPL_DIR/adapter/server.py" >/dev/null; then
+    die "an adapter is still running (scripts/adapter.sh stop)"
+  fi
   for db in "${NODE_DBS[@]}"; do
     psql_admin -d postgres -c "DROP DATABASE IF EXISTS $db WITH (FORCE)"
   done
   create_dbs
   rm -f "$CANTON_STATE_DIR/ids.json"
-  echo "db.sh: recreated ${NODE_DBS[*]}"
+  # Rejection records belong to the dropped ledger (interface §6.3).
+  rm -rf "$CANTON_STATE_DIR/requests"
+  echo "db.sh: recreated ${NODE_DBS[*]}; removed the adapters' rejection records"
 }
 
 case "${1:-}" in
@@ -112,5 +118,5 @@ case "${1:-}" in
   status) cmd_status ;;
   wipe) shift; cmd_wipe "$@" ;;
   psql) shift; psql_admin "$@" ;;
-  *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
