@@ -1,4 +1,6 @@
 *
 !app.py
+!storage.py
+!workflow.py
 !requirements.txt
 !Dockerfile

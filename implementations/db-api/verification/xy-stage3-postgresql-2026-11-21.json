@@ -1,0 +1,664 @@
+{
+  "record_type": "model_a_stage3_postgresql_verification_summary",
+  "validation_date": "2026-11-21",
+  "timezone": "Asia/Seoul",
+  "database": "PostgreSQL 17.12 on WSL Ubuntu",
+  "base_commit": "24bd66f5c30e47f9f313026809c1eebd6776224f",
+  "scope": "X→Y 자체 검증 전체 회귀",
+  "execution": {
+    "working_directory": "implementations/db-api",
+    "command_powershell": ".\\.venv\\Scripts\\python.exe stage3_verify.py --output $evidence --wsl-db-restarts",
+    "preparation": "README의 재현 절차에 따라 격리된 WSL PostgreSQL 17 테스트 DB 두 개를 준비하고, 각 실행은 새 run_id로 시작한다.",
+    "output_directory": "$evidence에는 새 로컬 결과 디렉터리를 지정한다."
+  },
+  "totals": {
+    "PASS": 58,
+    "INCONCLUSIVE": 0,
+    "FAIL": 0
+  },
+  "counts_by_case": {
+    "AC-03": {
+      "PASS": 14
+    },
+    "AC-04": {
+      "PASS": 3
+    },
+    "AC-05": {
+      "PASS": 2
+    },
+    "AC-06": {
+      "PASS": 2
+    },
+    "AC-07": {
+      "PASS": 1
+    },
+    "AC-08": {
+      "PASS": 10
+    },
+    "AC-09": {
+      "PASS": 10
+    },
+    "AC-11": {
+      "PASS": 5
+    },
+    "A-RECOVERY": {
+      "PASS": 5
+    },
+    "A-OBSERVATION": {
+      "PASS": 2
+    },
+    "XY-REGRESSION": {
+      "PASS": 4
+    }
+  },
+  "runs": [
+    {
+      "test_id": "AC-03",
+      "variant": "missing-auth-X",
+      "run_id": "ac-03-missing-auth-X-75ad932701",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "invalid-auth-X",
+      "run_id": "ac-03-invalid-auth-X-cd54b9e69e",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "forbidden-X",
+      "run_id": "ac-03-forbidden-X-030907d2d4",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "other-result-X",
+      "run_id": "ac-03-other-result-X-a7f87c45ab",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 6,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "snapshot-auth-X",
+      "run_id": "ac-03-snapshot-auth-X-55d9ede738",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "missing-auth-Y",
+      "run_id": "ac-03-missing-auth-Y-fa941fb4cd",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 6,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "invalid-auth-Y",
+      "run_id": "ac-03-invalid-auth-Y-ef2e0ab835",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 6,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "forbidden-Y",
+      "run_id": "ac-03-forbidden-Y-9c8ed6900c",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 6,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "other-result-Y",
+      "run_id": "ac-03-other-result-Y-30a66ef62e",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 27,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "snapshot-auth-Y",
+      "run_id": "ac-03-snapshot-auth-Y-f1e0863d27",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 6,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "missing-bundle-id",
+      "run_id": "ac-03-missing-bundle-id-28065e68b8",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "wrong-version-type",
+      "run_id": "ac-03-wrong-version-type-bd7fd3e41f",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "extra-permission-field",
+      "run_id": "ac-03-extra-permission-field-4ec264031b",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-03",
+      "variant": "wrong-platform",
+      "run_id": "ac-03-wrong-platform-d308bcaab4",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 0,
+      "reason": null
+    },
+    {
+      "test_id": "AC-04",
+      "variant": "no-reuse",
+      "run_id": "ac-04-no-reuse-ec6ee97563",
+      "fixture": "no-reuse",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 12,
+      "reason": null
+    },
+    {
+      "test_id": "AC-04",
+      "variant": "collateral-not-provided",
+      "run_id": "ac-04-collateral-not-provided-e270869de2",
+      "fixture": "collateral-not-provided",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 8,
+      "reason": null
+    },
+    {
+      "test_id": "AC-04",
+      "variant": "collateral-condition-failed",
+      "run_id": "ac-04-collateral-condition-failed-81c0ca7642",
+      "fixture": "collateral-condition-failed",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 8,
+      "reason": null
+    },
+    {
+      "test_id": "AC-05",
+      "variant": "absent-Y",
+      "run_id": "ac-05-absent-Y-8633a7c1b9",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 10,
+      "reason": null
+    },
+    {
+      "test_id": "AC-05",
+      "variant": "stale-Y",
+      "run_id": "ac-05-stale-Y-4fc628db3b",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 16,
+      "reason": null
+    },
+    {
+      "test_id": "AC-06",
+      "variant": "replay-X",
+      "run_id": "ac-06-replay-X-63635d3aec",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 10,
+      "reason": null
+    },
+    {
+      "test_id": "AC-06",
+      "variant": "replay-Y",
+      "run_id": "ac-06-replay-Y-55a3b42b68",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 35,
+      "reason": null
+    },
+    {
+      "test_id": "AC-07",
+      "variant": "conflict",
+      "run_id": "ac-07-conflict-d524a88c05",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 33,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-01",
+      "run_id": "ac-08-race-01-424a0f46dc",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 38,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-02",
+      "run_id": "ac-08-race-02-eadca95f7f",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-03",
+      "run_id": "ac-08-race-03-2efda86a03",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-04",
+      "run_id": "ac-08-race-04-bd6e1e6fd3",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-05",
+      "run_id": "ac-08-race-05-7db65196c8",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-06",
+      "run_id": "ac-08-race-06-64287b8e78",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-07",
+      "run_id": "ac-08-race-07-cc4ea847dd",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-08",
+      "run_id": "ac-08-race-08-0460ad9fd8",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-09",
+      "run_id": "ac-08-race-09-ddcde5d0b7",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-08",
+      "variant": "race-10",
+      "run_id": "ac-08-race-10-f786d67708",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 42,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-01",
+      "run_id": "ac-09-race-01-35716a7320",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-02",
+      "run_id": "ac-09-race-02-d0460e860b",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-03",
+      "run_id": "ac-09-race-03-58a62b3e9d",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-04",
+      "run_id": "ac-09-race-04-6687460bf7",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-05",
+      "run_id": "ac-09-race-05-f7606fc775",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-06",
+      "run_id": "ac-09-race-06-9771daabfe",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-07",
+      "run_id": "ac-09-race-07-5257b77776",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 32,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-08",
+      "run_id": "ac-09-race-08-74f716c0ae",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-09",
+      "run_id": "ac-09-race-09-a38893cdef",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "AC-09",
+      "variant": "race-10",
+      "run_id": "ac-09-race-10-a0f07a9107",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 33,
+      "reason": null
+    },
+    {
+      "test_id": "AC-11",
+      "variant": "hold-01",
+      "run_id": "ac-11-hold-01-3c5cee4ab3",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 29,
+      "reason": null
+    },
+    {
+      "test_id": "AC-11",
+      "variant": "hold-02",
+      "run_id": "ac-11-hold-02-d82d372087",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 29,
+      "reason": null
+    },
+    {
+      "test_id": "AC-11",
+      "variant": "hold-03",
+      "run_id": "ac-11-hold-03-5f0ae2cdee",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 33,
+      "reason": null
+    },
+    {
+      "test_id": "AC-11",
+      "variant": "hold-04",
+      "run_id": "ac-11-hold-04-43c61ef1f0",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 33,
+      "reason": null
+    },
+    {
+      "test_id": "AC-11",
+      "variant": "hold-05",
+      "run_id": "ac-11-hold-05-7e52352de5",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 33,
+      "reason": null
+    },
+    {
+      "test_id": "A-RECOVERY",
+      "variant": "lost-confirm",
+      "run_id": "a-recovery-lost-confirm-40c176b879",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 30,
+      "reason": null
+    },
+    {
+      "test_id": "A-RECOVERY",
+      "variant": "restart-Y-api",
+      "run_id": "a-recovery-restart-Y-api-c563ae4420",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 28,
+      "reason": null
+    },
+    {
+      "test_id": "A-RECOVERY",
+      "variant": "restart-X-api",
+      "run_id": "a-recovery-restart-X-api-03135df415",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 35,
+      "reason": null
+    },
+    {
+      "test_id": "A-RECOVERY",
+      "variant": "restart-X-db",
+      "run_id": "a-recovery-restart-X-db-e8bea9c8bb",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 31,
+      "reason": null
+    },
+    {
+      "test_id": "A-RECOVERY",
+      "variant": "restart-Y-db",
+      "run_id": "a-recovery-restart-Y-db-81370bc619",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 33,
+      "reason": null
+    },
+    {
+      "test_id": "A-OBSERVATION",
+      "variant": "outbox-restart-X",
+      "run_id": "a-observation-outbox-restart-X-700a3ebd7c",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 5,
+      "reason": null
+    },
+    {
+      "test_id": "A-OBSERVATION",
+      "variant": "outbox-restart-Y",
+      "run_id": "a-observation-outbox-restart-Y-ee062e0fb5",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 30,
+      "reason": null
+    },
+    {
+      "test_id": "XY-REGRESSION",
+      "variant": "normal",
+      "run_id": "xy-regression-normal-067225ba40",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 27,
+      "reason": null
+    },
+    {
+      "test_id": "XY-REGRESSION",
+      "variant": "reserved-write-error",
+      "run_id": "xy-regression-reserved-write-error-622dd89a42",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 26,
+      "reason": null
+    },
+    {
+      "test_id": "XY-REGRESSION",
+      "variant": "consumed-write-error",
+      "run_id": "xy-regression-consumed-write-error-51b72e98fe",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 37,
+      "reason": null
+    },
+    {
+      "test_id": "XY-REGRESSION",
+      "variant": "abort",
+      "run_id": "xy-regression-abort-b4585318c0",
+      "fixture": "f0-normal",
+      "functional_verdict": "PASS",
+      "verdict": "PASS",
+      "event_count": 17,
+      "reason": null
+    }
+  ],
+  "evidence": {
+    "local_directory": "implementations/db-api/logs/stage3-causal-full-20261121T072029620Z",
+    "records": {
+      "events.jsonl": 1412,
+      "snapshots.jsonl": 248,
+      "http.jsonl": 448,
+      "faults.jsonl": 40
+    },
+    "file_count": 235,
+    "summary_sha256": "73eb524d1be4c9795c70989402c34b2b931bf679c69df65eff5f93a130356707",
+    "manifest_sha256": "9da757969232e3f591fb3e1c92c284e7661ec02681b5c4dd7aa17a85daedeca4",
+    "source_sha256_lf": {
+      "implementations/db-api/app.py": "6aa8e2eda6826915e41327d0193f3876570b42e2f6a7bb8d07db542f434c4607",
+      "implementations/db-api/storage.py": "fad177e0f19e6cf151d808360cd2b06fb91f8a9f82171292bfbee2a694a1f0c7",
+      "implementations/db-api/workflow.py": "d05b4448dea8c078ee3ce5b94806ace9af467e823c323ec72269e8c4aabef1fe",
+      "implementations/db-api/stage3_verify.py": "e2d8205f26f59fb7ca7dee04bc57f8a217ecbceb9f83c78ca668d6bd23608dec",
+      "implementations/db-api/requirements.txt": "ed7d82f13c9765e27322176185736b8d2c0eed478097a4d76f530f96a49f6d55"
+    },
+    "github_limit": "원본 로그와 원본 manifest.json은 Git에서 제외한다. GitHub에서는 이 요약과 기록된 해시를 볼 수 있으며, 실제 증거 파일과 해시를 직접 대조하려면 로컬 원본이 필요하다."
+  },
+  "common_acceptance_tests": {
+    "verdict": "NOT_RUN",
+    "reason": "연구 총괄의 초기 적재와 이벤트 수집 연결이 남아 있으며, 이번 배치는 Model A X→Y 자체 검증으로 실행했다."
+  },
+  "docker_compose_stage3": {
+    "verdict": "NOT_RUN",
+    "reason": "이번 회귀 배치는 기존 Docker 저장소를 사용하지 않고 WSL PostgreSQL과 로컬 API로 실행했다."
+  }
+}
