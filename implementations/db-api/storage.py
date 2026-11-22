@@ -35,7 +35,7 @@ bundles = Table(
     CheckConstraint("bundle_id ~ '^[A-Za-z0-9._:-]{1,120}$'"),
     CheckConstraint("quantity ~ '^[1-9][0-9]*$'"),
     CheckConstraint("reference_amount ~ '^(0|[1-9][0-9]*)$'"),
-    CheckConstraint("version BETWEEN 0 AND 2"),
+    CheckConstraint("version BETWEEN 0 AND 3"),
 )
 agreements = Table(
     "agreements", metadata, run_key(), Column("agreement_id", String(128), primary_key=True),
@@ -62,8 +62,9 @@ rights = Table(
     CheckConstraint("(created_version = 0 AND holder = 'BANK_A' AND source_record_id IS NULL) OR "
                     "(created_version = 1 AND holder = 'BANK_B' AND source_record_id IS NOT NULL) OR "
                     "(created_version = 2 AND holder = 'BANK_C' AND source_record_id IS NOT NULL)"),
-    CheckConstraint("status IN ('AVAILABLE','CONSUMED')"),
-    CheckConstraint("status <> 'CONSUMED' OR allowed_commands = '[]'::jsonb"),
+    CheckConstraint("status IN ('AVAILABLE','CONSUMED','LOCKED')"),
+    CheckConstraint("status <> 'LOCKED' OR created_version = 2"),
+    CheckConstraint("status = 'AVAILABLE' OR allowed_commands = '[]'::jsonb"),
     CheckConstraint("jsonb_typeof(allowed_commands) = 'array'"),
 )
 Index("one_available_right", rights.c.run_id, rights.c.bundle_id, unique=True,
@@ -124,6 +125,40 @@ events = Table(
     "events", metadata, run_key(), Column("event_id", String(128), primary_key=True),
     Column("payload", JSONB, nullable=False),
 )
+
+margin_calls = Table(
+    "margin_calls", metadata, run_key(), Column("margin_call_id", String(128), primary_key=True),
+    Column("bundle_id", String(128), nullable=False), bundle_fk(),
+    Column("provider", String(8), nullable=False), Column("ccp", String(8), nullable=False),
+    Column("whole_bundle_accepted", Boolean, nullable=False),
+    Column("eligibility_passed", Boolean, nullable=False),
+    Column("status", String(9), nullable=False),
+    CheckConstraint("provider = 'BANK_C' AND ccp = 'CCP'"),
+    CheckConstraint("status IN ('OPEN','SATISFIED')"),
+    UniqueConstraint("run_id", "margin_call_id", "bundle_id"),
+)
+allocations = Table(
+    "allocations", metadata, run_key(), Column("allocation_id", String(128), primary_key=True),
+    Column("margin_call_id", String(128), nullable=False),
+    Column("bundle_id", String(128), nullable=False),
+    ForeignKeyConstraint(("run_id", "margin_call_id", "bundle_id"),
+                         ("margin_calls.run_id", "margin_calls.margin_call_id", "margin_calls.bundle_id")),
+    UniqueConstraint("run_id", "bundle_id"),
+    UniqueConstraint("run_id", "margin_call_id"),
+)
+allocation_locks = Table(
+    "allocation_locks", metadata, run_key(), Column("request_id", String(128), primary_key=True),
+    Column("bundle_id", String(128), nullable=False),
+    Column("command", JSONB, nullable=False),
+    Column("denial", String(32)),
+    Column("source_record_id", String(128)),
+    Column("message_id", String(32)),
+    CheckConstraint("(denial IS NULL AND source_record_id IS NOT NULL AND message_id IS NOT NULL) OR "
+                    "(denial IS NOT NULL AND source_record_id IS NULL AND message_id IS NULL)"),
+    UniqueConstraint("run_id", "message_id"),
+)
+Index("one_ccp_lock_per_bundle", allocation_locks.c.run_id, allocation_locks.c.bundle_id,
+      unique=True, postgresql_where=allocation_locks.c.denial.is_(None))
 
 
 def rows(connection, table, **keys):

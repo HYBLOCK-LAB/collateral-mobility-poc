@@ -10,6 +10,7 @@ import storage as db
 logger = logging.getLogger(__name__)
 REPO = "CONFIRM_REPO"
 LOAN = "CONFIRM_LOAN"
+MARGIN = "ALLOCATE_MARGIN"
 
 
 def error(code):
@@ -20,11 +21,13 @@ def result(context, outcome, code=None):
     reply = {key: context[key] for key in ("run_id", "request_id", "actor", "command_type")}
     effect = None
     if outcome == "COMMITTED":
-        before = 0 if context["command_type"] == REPO else 1
+        before, record_type = {
+            REPO: (0, "REPO"), LOAN: (1, "LOAN"), MARGIN: (2, "ALLOCATION"),
+        }[context["command_type"]]
         effect = {
             "bundle_id": context["bundle_id"], "record_id": context["record_id"],
             "version_before": before, "version_after": before + 1,
-            "record_type": "REPO" if before == 0 else "LOAN",
+            "record_type": record_type,
         }
     return dict(reply, outcome=outcome, replayed=False, effect=effect, error=error(code) if code else None)
 
