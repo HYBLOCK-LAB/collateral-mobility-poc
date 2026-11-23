@@ -1,6 +1,9 @@
 """Z allocation and the authoritative C-bank right lock on Y."""
 
 import logging
+from dataclasses import dataclass, field
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 from uuid import UUID, uuid4
 
 import httpx
@@ -69,9 +72,189 @@ def lock_right(connection, workflow, context, command):
     return decision
 
 
+@dataclass
+class ReadinessEvidence:
+    in_flight: int = 0
+    generated: int = 0
+    queued: int = 0
+    writing: int = 0
+    committed: int = 0
+    event_ids: list[str] = field(default_factory=list)
+    failure: str | None = None
+    sealed: bool = False
+
+
+class ReadinessEventWriter:
+    """Persist complete observation batches off the readiness request path."""
+
+    def __init__(self, engine, log, capacity=128):
+        self.engine = engine
+        self.log = log
+        self.pending = Queue(maxsize=capacity)
+        self.stopping = Event()
+        self.lock = Lock()
+        self.runs = {}
+        self.dropped = 0
+        self.thread = Thread(target=self.run, name="z-readiness-events", daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def register(self, run_id):
+        with self.lock:
+            if run_id in self.runs or self.stopping.is_set() or not self.thread.is_alive():
+                return False
+            if len(self.runs) >= 256:
+                old = next((key for key, state in self.runs.items()
+                            if state.sealed and not (state.in_flight or state.queued or state.writing)), None)
+                if old is None:
+                    return False
+                del self.runs[old]
+            self.runs[run_id] = ReadinessEvidence()
+            return True
+
+    def begin_observation(self, run_id):
+        with self.lock:
+            state = self.runs.get(run_id)
+            if state is not None:
+                state.in_flight += 1
+                if state.sealed:
+                    state.failure = state.failure or "QUERY_AFTER_SEAL"
+
+    def submit(self, run_id, observations, failure=None):
+        with self.lock:
+            state = self.runs.get(run_id)
+            count = len(observations)
+            if state is not None:
+                state.in_flight -= 1
+                state.failure = state.failure or failure
+                state.generated += count
+                if state.generated <= 4096:
+                    state.event_ids.extend(e["event_id"] for e in observations)
+                else:
+                    state.failure = state.failure or "TRACKING_LIMIT"
+            if not count:
+                return
+            if self.stopping.is_set():
+                if state is not None:
+                    state.failure = state.failure or "WRITER_STOPPED"
+                return
+            try:
+                self.pending.put_nowait((run_id, observations))
+            except Full:
+                self.dropped += 1
+                if state is not None:
+                    state.failure = state.failure or "QUEUE_FULL"
+            else:
+                if state is not None:
+                    state.queued += count
+
+    def seal(self, run_id):
+        with self.lock:
+            state = self.runs.get(run_id)
+            if state is None:
+                return {"status": "INCOMPLETE", "reason": "UNKNOWN_RUN"}
+            state.sealed = True
+            progress = {
+                "run_id": run_id, "producer_id": self.log.producer, "clock_id": self.log.clock,
+                "in_flight": state.in_flight, "generated": state.generated,
+                "queued": state.queued, "writing": state.writing, "committed": state.committed,
+            }
+            if self.stopping.is_set() or not self.thread.is_alive():
+                return dict(progress, status="INCOMPLETE", reason="WRITER_STOPPED")
+            if state.failure:
+                return dict(progress, status="INCOMPLETE", reason=state.failure)
+            if state.in_flight or state.queued or state.writing:
+                return dict(progress, status="PENDING")
+            if state.generated != state.committed or state.committed != len(state.event_ids):
+                return dict(progress, status="INCOMPLETE", reason="COMMIT_COUNT_MISMATCH")
+            return dict(progress, status="COMPLETE", event_ids=sorted(state.event_ids))
+
+    def report_dropped(self):
+        with self.lock:
+            dropped, self.dropped = self.dropped, 0
+        if dropped:
+            logger.warning("Dropped %d Z readiness observation batches because the queue was full", dropped)
+
+    def run(self):
+        try:
+            while not self.stopping.is_set() or not self.pending.empty():
+                self.report_dropped()
+                try:
+                    run_id, observations = self.pending.get(timeout=0.1)
+                except Empty:
+                    continue
+                count = len(observations)
+                with self.lock:
+                    state = self.runs.get(run_id)
+                    if state is not None:
+                        state.queued -= count
+                        state.writing += count
+                try:
+                    with self.engine.begin() as connection:
+                        for event in observations:
+                            self.log.store(connection, event)
+                except SQLAlchemyError:
+                    with self.lock:
+                        if state is not None:
+                            state.failure = state.failure or "STORE_FAILED"
+                    logger.warning("Could not store Z readiness message observations")
+                else:
+                    with self.lock:
+                        if state is not None:
+                            state.committed += count
+                finally:
+                    with self.lock:
+                        if state is not None:
+                            state.writing -= count
+                    self.pending.task_done()
+        finally:
+            with self.lock:
+                self.stopping.set()
+            self.report_dropped()
+            self.engine.dispose()
+
+    def close(self):
+        with self.lock:
+            self.stopping.set()
+        self.thread.join(timeout=1)
+        if self.thread.is_alive():
+            logger.warning("Z readiness message observations did not drain before shutdown")
+
+
 class AllocationWorkflow(Workflow):
-    def __init__(self, engine, y_url, internal_token):
+    def __init__(self, engine, y_url, internal_token, readiness_event_engine):
         super().__init__(engine, "Z", y_url or "http://api-y:8000", internal_token)
+        self.readiness_writer = ReadinessEventWriter(readiness_event_engine, self.log)
+
+    def query_y_readiness(self, context):
+        run_id = context["run_id"]
+        self.readiness_writer.begin_observation(run_id)
+        observations = []
+        failure = None
+
+        def observe(event_type, kind, source, destination):
+            observations.append(self.log.capture(
+                context, event_type, message_id=uuid4().hex, message_kind=kind,
+                message_category="BUSINESS_INTEGRATION", source_id=source, destination_id=destination,
+            ))
+
+        def trace(name, _info):
+            if name == "http11.send_request_headers.complete" and not observations:
+                observe("MESSAGE_SENT", "REQUEST", "Z", "Y")
+
+        try:
+            response = self.peer.get(
+                f"/internal/runs/{context['run_id']}/ccp-rights/{context['bundle_id']}",
+                extensions={"trace": trace},
+            )
+            # HTTPX has read the full response before returning, including on HTTP errors.
+            if not observations:
+                failure = "REQUEST_TRACE_MISSING"
+            observe("MESSAGE_RECEIVED", "RESPONSE", "Y", "Z")
+            return response
+        finally:
+            self.readiness_writer.submit(run_id, observations, failure)
 
     def blocking_reason(self, connection, run_id, bundle_id, margin_call_id):
         keys = dict(run_id=run_id, bundle_id=bundle_id)

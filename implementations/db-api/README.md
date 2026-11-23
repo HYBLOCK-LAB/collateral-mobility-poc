@@ -320,4 +320,46 @@ Windows Python API 세 개와 WSL에 새로 만든 독립 PostgreSQL 17.12 클�
 
 세 환경의 `/health/db`, 공개 결과와 snapshot의 공통 Schema, DB 이벤트 Schema와 거래·권리 이력을 확인했다. 로컬 배치 `logs/z-minimum-6b2b9bb6d8/`의 `summary.json`과 `manifest.json`에 실행 ID·판정·업무 증거 해시가 있고, 실행별 snapshot·결과·이벤트 JSONL을 보존했다. Compose는 설정 검사만 실행했다. 실제 Compose 빌드·기동, 공통 XYZ 연결과 AC-01~11, 전체 X→Y 회귀 배치 및 Z의 전체 거절·경합·재시작 행렬은 아직 실행하지 않았다.
 
+### Z readiness 메시지 증거 수집 완료 확인
+
+XYZ 검증은 PR #10의 XYZ용 `prepare.py`·`collect_events.py`와 함께 실행한다.
+단일 Z API 프로세스가 준비부터 수집까지 같은 실행을 담당해야 한다.
+Z 시작 전에 `MODEL_A_READINESS_EVIDENCE_TOKEN_FILE`에 전용 임의 토큰 파일의 경로를 설정한다.
+Model A 래퍼에도 같은 파일을 읽기 전용으로 제공한다. API·DB 자격과 분리하고,
+파일 내용이나 비밀값을 인자·설정 JSON·증거에 기록하지 않는다.
+공통 수집 스크립트에는 기존 플랫폼별 읽기 전용 DSN만 넘긴다.
+
+XYZ 설정과 실행 명령에서 Z 제어 URL과 토큰 파일 경로를 실제 환경에 맞춘다.
+XYZ 단계 구분을 위해 적재기·수집기 경로와 마지막 `xyz`를 명령 인자에 유지한다.
+
+```json
+{
+  "prepare_command": [
+    "python", "implementations/db-api/readiness_evidence.py", "prepare",
+    "http://api-z:8000", "/run/secrets/model_a_readiness_evidence",
+    "implementations/db-api/prepare.py", "xyz"
+  ]
+}
+```
+
+```sh
+python tests/conformance/runner.py check --stage xyz --observer-auth bearer \
+  --config tests/conformance/config.a.xyz.local.json \
+  --collect-command python implementations/db-api/readiness_evidence.py collect \
+    http://api-z:8000 /run/secrets/model_a_readiness_evidence implementations/db-api/collect_events.py xyz
+```
+
+준비 래퍼는 DB에 없는 새 `run_id`를 Z에 등록한 후 기존 적재 명령을 실행한다.
+수집은 해당 run을 닫고 진행 중 조회, 큐, 쓰기 트랜잭션이 끝날 때까지 최대 4초의 확인 시간 예산으로 기다린다.
+작업자가 커밋한 이벤트 ID 집합을 기존 수집기가 PostgreSQL에서 내보낸 이벤트와 대조하고,
+같은 작업자·시계의 완료 상태를 다시 확인한 경우에만 요청된 JSONL 경로를 게시한다.
+수집 시점까지 정상 조회가 없었던 등록된 run은 빈 readiness 이벤트 집합을 가질 수 있다.
+장애나 실패로 중단된 실행은 기존 run을 재등록하지 않고 새 run으로 시작한다.
+
+큐 포화, 저장 실패, 종료·재시작으로 인한 미확인 상태, 확인 기한 초과는 종료 코드 1이다.
+유실을 소급해 채우지 않는다. 가능하면 별도 이름의 진단 JSONL과 종료 사유를 남기며,
+이미 게시된 결과를 덮어쓰지 않는다. 최종 JSONL 게시에는 결과 디렉터리의 하드 링크 지원이 필요하다.
+동일 run에 대한 명령과 readiness 호출은 수집 시작 전에 끝내고, 수집을 시작한 run을 다시 사용하지 않는다.
+기본 XY 실행은 기존 적재·수집 명령을 사용한다.
+
 최종 인계는 공통 XYZ 연결과 [공통 실행기](../../tests/conformance/README.md)의 AC-01~11 필수 변형·반복·증빙이 모두 갖춰진 뒤 진행한다.

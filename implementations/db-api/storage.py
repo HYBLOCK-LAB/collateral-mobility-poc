@@ -226,6 +226,9 @@ class EventLog:
         self.lock = Lock()
 
     def write(self, connection, context, kind, **fields):
+        self.store(connection, self.capture(context, kind, **fields))
+
+    def capture(self, context, kind, **fields):
         event = dict.fromkeys((
             "request_id", "attempt_id", "bundle_id", "record_id", "actor",
             "outcome", "error_code", "version_before", "version_after",
@@ -236,6 +239,9 @@ class EventLog:
             context, event_id=uuid4().hex, event_type=kind, model="A",
             platform=self.platform, producer_id=self.producer, clock_id=self.clock, **fields,
         )
+        return event
+
+    def store(self, connection, event):
         connection.execute(events.insert().values(
             run_id=event["run_id"], event_id=event["event_id"], payload=event,
         ))

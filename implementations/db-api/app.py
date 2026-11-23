@@ -48,15 +48,25 @@ tokens = {
 }
 internal_token = os.getenv("MODEL_A_INTERNAL_TOKEN") if platform != "Z" else None
 yz_token = os.getenv("MODEL_A_YZ_INTERNAL_TOKEN") if platform != "X" else None
+readiness_token_file = os.getenv("MODEL_A_READINESS_EVIDENCE_TOKEN_FILE") if platform == "Z" else None
+readiness_token = Path(readiness_token_file).read_text(encoding="utf-8").strip() if readiness_token_file else None
 credentials = [*tokens.values()]
 if platform != "Z":
     credentials.append(internal_token)
 if platform == "Z" or yz_token:
     credentials.append(yz_token)
+if readiness_token_file:
+    credentials.append(readiness_token)
 if not all(credentials) or len(set(credentials)) != len(credentials):
     raise ValueError("Configure distinct nonempty API tokens")
-workflow = (AllocationWorkflow(engine, os.getenv("MODEL_A_Y_URL"), yz_token) if platform == "Z"
-            else Workflow(engine, platform, os.getenv("MODEL_A_X_URL"), internal_token))
+if platform == "Z":
+    readiness_event_engine = create_engine(
+        engine.url, pool_size=1, max_overflow=0, pool_timeout=1, pool_pre_ping=True,
+        connect_args={"connect_timeout": 3, "options": "-c lock_timeout=250 -c statement_timeout=1000"},
+    )
+    workflow = AllocationWorkflow(engine, os.getenv("MODEL_A_Y_URL"), yz_token, readiness_event_engine)
+else:
+    workflow = Workflow(engine, platform, os.getenv("MODEL_A_X_URL"), internal_token)
 schema_dir = Path(os.getenv("MODEL_A_SCHEMA_DIR", Path(__file__).parent / "schemas"))
 command_schema = Draft202012Validator(json.loads((schema_dir / "command.schema.json").read_text(encoding="utf-8")))
 identifier = re.compile(r"[A-Za-z0-9._:-]{1,128}")
@@ -77,12 +87,16 @@ async def recovery_loop(stopped):
 @asynccontextmanager
 async def lifespan(_app):
     await asyncio.to_thread(db.metadata.create_all, engine)
+    if platform == "Z":
+        workflow.readiness_writer.start()
     stopped = asyncio.Event()
     recovery = asyncio.create_task(recovery_loop(stopped))
     try:
         yield
     finally:
         stopped.set()
+        if platform == "Z":
+            await asyncio.to_thread(workflow.readiness_writer.close)
         await recovery
         workflow.peer.close()
         engine.dispose()
@@ -373,20 +387,43 @@ if platform == "Y" and yz_token:
 
 
 if platform == "Z":
+    if readiness_token:
+        @app.post("/internal/runs/{run_id}/readiness-evidence/register")
+        def register_readiness_evidence(request: Request, run_id: str):
+            require_internal(request, run_id, readiness_token)
+            with consistent_read() as connection:
+                if db.require_run(connection, run_id):
+                    raise ApiError("REQUEST_ID_CONFLICT", 409)
+            if not workflow.readiness_writer.register(run_id):
+                raise ApiError("TEMPORARILY_UNAVAILABLE", 503)
+            return {"run_id": run_id, "status": "REGISTERED"}
+
+        @app.post("/internal/runs/{run_id}/readiness-evidence/seal")
+        def seal_readiness_evidence(request: Request, run_id: str):
+            require_internal(request, run_id, readiness_token)
+            return workflow.readiness_writer.seal(run_id)
+
     @app.get("/runs/{run_id}/readiness")
     def allocation_readiness(request: Request, run_id: str, bundle_id: str, margin_call_id: str, command_type: str):
         if command_type != MARGIN or not all(map(valid_id, (run_id, bundle_id, margin_call_id))):
             raise ApiError("INVALID_REQUEST", 400)
         with consistent_read() as connection:
-            authorize(connection, request, run_id, actor="BANK_C")
+            actor = authorize(connection, request, run_id, actor="BANK_C")
             bundle, local_block = workflow.blocking_reason(connection, run_id, bundle_id, margin_call_id)
         if bundle is None:
             raise ApiError("NOT_FOUND", 404)
         version = bundle["version"]
         reasons = {local_block} if local_block else set()
         if version < 3:
+            test_id = request.headers.get("X-Test-ID")
+            attempt_id = request.headers.get("X-Attempt-ID")
+            context = {
+                "run_id": run_id, "bundle_id": bundle_id, "actor": actor, "command_type": MARGIN,
+                "test_id": test_id if valid_id(test_id) else "MANUAL",
+                "attempt_id": attempt_id if valid_id(attempt_id) else uuid4().hex,
+            }
             try:
-                response = workflow.peer.get(f"/internal/runs/{run_id}/ccp-rights/{bundle_id}")
+                response = workflow.query_y_readiness(context)
                 response.raise_for_status()
                 authority = response.json()
                 if type(authority["version"]) is not int or authority["version"] not in (0, 1, 2):
