@@ -315,7 +315,7 @@ class Execution:
                         if not any(e["event_type"] == kind and e["request_id"] == command["request_id"]
                                    for e in self.events):
                             self.event(kind, platform, command, attempt, body, actor=self.actors[role])
-                        self.results.append((command, body))
+                        self.results.append([command, body])
                     return body
             if not recover:
                 return body

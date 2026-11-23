@@ -150,3 +150,33 @@ Manifest 자체 해시와 136개 파일 해시가 모두 일치했다. 원본은
   자체 시험 수이며 실제 B1 필수 71건 최종 검증을 수행했다는 뜻이 아니다.
 - 실제 Canton에서 새 증빙 도구·전체 --final은 NOT_RUN이다. 코드 게시 후 양하님 환경에서
   실제 값을 확인하고 실행해야 한다. 기준 명세·Schema·fixture·필수 기대 결과는 변경하지 않았다.
+
+## B1 실제 --final 첫 시도와 실행기 표현 결함
+
+[최종 실행 보고](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/9#issuecomment-7097544311)와
+[원인 분석](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/9#issuecomment-7097544891)을
+원본과 대조했다. 구현 4b827d6+연결 8d084b6의 prepare·preflight는 종료 0,
+최종 배치 batch-98284d2baf394869bd3feddf3264ce87은 71건 PASS였지만 종료 1,
+final_handoff_eligible=false이며 stored run verdict/content mismatch 60건을 기록했다.
+
+ZIP SHA-256 4a837074762b9fa0672392721466060194a37bcd04b86f84efc18b90f288223e,
+Manifest 1,685개 파일이 모두 일치했다. 공통 소스 66개, 초기 snapshot 213개,
+사례 구현 이벤트 3,825개와 원본 JSONL·수집 본문·해시·context 연결을 확인했다.
+저장된 사례 판정과 배치 runs는 모두 동일했다. 저장된 행으로 final_gate를 실행하면
+차단 0건이고, 명령/결과를 메모리 당시의 튜플 형태로 복원하면 차단 60건이 재현된다.
+원인 분석은 Accept다. 비교 검증을 제거하지 않고 Execution.submit의 결과 생성 한 줄을
+JSON 호환 리스트로 고쳤다. 자체 시험에서도 실제 결과와 JSON 왕복 결과의 동등성 및
+인위적 정규화 없이 final_gate 통과·증거 변조 거부를 확인했다.
+
+최신 자체 메시지 검사기로 전체 원본을 재검사한 결과 종료 0, 문제 0, 응답 미기록 0,
+대조 command 176/readiness 43/result 6/snapshot 504/snapshot-file 216이었다.
+DAR 파일 자체는 ZIP에 없으므로 context의 DAR 해시는 선언값으로 보존하며 실제 파일을
+총괄이 재해시했다고 보고하지 않는다. 환경 기록은 macOS 네이티브, PostgreSQL 17.12,
+클러스터 관리자 세션의 fsync/synchronous_commit/full_page_writes=on이다. 사용자
+백그라운드 작업이 있었음을 보존하고 동일 조건의 비교 계측 완료로 확대하지 않는다.
+
+감사는 업무를 재실행하거나 기존 판정·final_handoff_eligible을 수정하지 않았다.
+원본·감사 결과는 results/b1-final-audit-20261123/에 보존했다. 실제 최종 인수는 아직
+미완료다. 수정 소스 게시 후 같은 전용 환경·원본 보존 조건에서 전체 --final만 새
+배치로 한 번 실행한다. 재설치·DB 초기화·중간 필터 4건은 불필요하다. 상세 절차는
+B1_FINAL_RUNBOOK.md 제6절을 따른다. B2 조기 개발은 이 수정과 병행할 수 있다.

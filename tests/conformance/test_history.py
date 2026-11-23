@@ -85,11 +85,9 @@ class HistoryTests(unittest.TestCase):
             (path / "evidence/implementation-events.json").write_text(json.dumps({
                 "body": "\n".join(json.dumps(e) for e in events)}))
             row = dict(case, run_id="run-history", model="A", path="run", verdict="PASS",
-                       evidence_complete=True, command_results=[(command, result)], race_requests=[])
+                       evidence_complete=True, command_results=[[command, result]], race_requests=[])
             row["evidence_sha256"] = {str(p.relative_to(path)): hashlib.sha256(p.read_bytes()).hexdigest()
                                       for p in path.rglob("*") if p.is_file()}
-            # JSON round-trip matches persisted lists rather than Python tuples.
-            row = json.loads(json.dumps(row))
             (path / "checks.json").write_text(json.dumps(row))
             self.assertEqual(final_gate("A", [row], [case], batch), [])
             (path / "evidence/implementation-events.json").write_text("{}")

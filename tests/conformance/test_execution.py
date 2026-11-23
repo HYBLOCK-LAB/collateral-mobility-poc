@@ -147,6 +147,9 @@ class ScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.version, 2)
         with self.assertRaises(EvidenceMissing):
             history_check([], self.execution.results)
+        # Live command evidence must compare equal to its persisted JSON representation.
+        self.assertTrue(self.execution.results)
+        self.assertEqual(self.execution.results, json.loads(json.dumps(self.execution.results)))
 
     async def test_xy_no_reuse(self):
         self.fixture["agreements"][0]["reuse_allowed"] = False

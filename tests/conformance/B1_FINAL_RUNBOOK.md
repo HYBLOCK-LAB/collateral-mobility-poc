@@ -29,6 +29,7 @@ git restore --source="$B1_FINAL_CONNECTION_COMMIT" --worktree -- \
   tests/conformance/test_runner.py tests/conformance/test_history.py \
   tests/conformance/test_report.py tests/conformance/test_canton_connection.py \
   tests/conformance/test_reassignment.py tests/conformance/test_batch.py \
+  tests/conformance/test_execution.py \
   tests/conformance/b1_final_context.py tests/conformance/test_b1_final_context.py \
   tests/conformance/config.b1.xyz.example.json \
   tests/conformance/B1_XYZ_RUNBOOK.md tests/conformance/B1_FINAL_RUNBOOK.md \
@@ -179,3 +180,64 @@ repo/·state/ 전체를 ZIP에 넣지 않는다. 특히 state/secrets는 제외�
 총괄이 원본을 대조한 뒤 최종 인계·병합을 사용자에게 요청한다.
 이 문서·스크립트의 자체 시험 통과는 실제 B1 최종 검증 PASS가 아니다. 반복 실험은
 A·B1 최종 검증과 동일 조건의 계측 준비 확인 뒤 별도 세션에서 진행한다.
+
+## 6. 8d084b6 최종 시도의 실행기 표현 결함 보완
+
+기존 `batch-98284d2baf394869bd3feddf3264ce87`은 71개 사례가 PASS였지만,
+메모리의 명령/결과 튜플과 JSON 리스트를 비교해 최종 차단 60건이 발생했다.
+그 배치의 종료 1·final_handoff_eligible=false는 원본대로 보존한다.
+오프라인 증거 검사는 통과했지만 원본의 필드를 true로 직접 수정하지 않는다.
+보완은 실행기의 결과 생성 한 줄이며 업무 구현·검증 조건·명세는 바뀌지 않는다.
+
+이 최종 시도에 사용한 검증 전용 환경의 구현·설정·자원 조건이 그대로이고 서비스도
+같은 상태라면 설치·DB 초기화·기동·중간 4건을 반복할 필요는 없다. 기존 원본을 별도로
+보존한 후 수정 실행기에서 전체 --final만 새 batch/run_id로 한 번 실행한다.
+
+이미 8d084b6 조합을 적용한 그 checkout에서, 담당자의 추가 편집이 없는지 먼저 확인한다.
+아래 비교가 실패하면 중단하고 미커밋 변경을 보존한다. 기존 B2 개발 checkout에 적용하지 않는다.
+
+```sh
+git diff --exit-code 8d084b69948b16f2ed7db3816536ea1781a2470e -- \
+  tests/conformance/runner.py tests/conformance/test_execution.py \
+  tests/conformance/test_history.py || exit 1
+git fetch origin feat/b1-z-integration || exit 1
+B1_FINAL_FIX_COMMIT="$(git rev-parse FETCH_HEAD)"
+export B1_FINAL_FIX_COMMIT
+git restore --source="$B1_FINAL_FIX_COMMIT" --worktree -- \
+  tests/conformance/runner.py tests/conformance/test_execution.py \
+  tests/conformance/test_history.py tests/conformance/B1_FINAL_RUNBOOK.md \
+  tests/conformance/baselines/model-b1-xyz-review-20261123.md || exit 1
+```
+
+게시된 수정 커밋과 위 SHA가 같은지 확인하고 자체 시험을 실행한다. 이전 콘솔·소스 조합
+파일을 덮어쓰지 않고 새 연결 SHA·변경 내역을 별도 이름으로 기록한다. 구현·DAR·환경과
+context의 일치를 다시 확인하고, 제4절의 --final 명령에 **새 output 디렉터리**를 준다.
+호출 검사는 그 새 디렉터리와 같은 실제 이벤트 폴더를 함께 지정한다. 준비 명령을 다시
+실행하지 않았다면 snapshot-file은 사례 71×3=213개가 기대값이다. 과거 준비 3개를
+새 output에 복사하거나 두 배치의 반복 수를 합쳐 인수 조건을 채우지 않는다.
+새 배치 원본·현재 context·실제 JSONL·호출 검사·명령별 종료 코드·Manifest를 공유한다.
+환경/구현 조건이 달라졌으면 제1~4절의 새 조합 고정 절차를 따른다.
+
+같은 검증 전용 checkout/상태를 유지한 경우의 실행 명령이다. `B1_FINAL_ROOT`는 이전
+검증의 실제 전용 루트이며, 모르면 이전 경로를 확인한다. 임의의 다른 폴더로 채우지 않는다.
+
+```sh
+: "${B1_FINAL_ROOT:?이전 검증 전용 루트를 확인하세요}"
+source implementations/canton/scripts/env.sh
+.venv/bin/python -m unittest discover -s tests/conformance -p 'test_*.py'
+B1_FINAL_RETRY_OUT="$(mktemp -d "$B1_FINAL_ROOT/final-tuple-fix.XXXXXX")" || exit 1
+printf 'implementation=4b827d661551ef63033b76da401b273135aa2bdf\nconnection=%s\n' \
+  "$B1_FINAL_FIX_COMMIT" > "$B1_FINAL_RETRY_OUT/source-combination.txt"
+.venv/bin/python tests/conformance/runner.py check \
+  --config tests/conformance/config.b1.final.local.json --observer-auth bearer \
+  --stage xyz --final --output "$B1_FINAL_RETRY_OUT"
+```
+
+종료 코드와 출력 배치의 checks.json을 보존·확인한 뒤 호출 검사를 별도로 실행한다.
+
+```sh
+implementations/canton/.venv/bin/python -I \
+  implementations/canton/selftest/message_log_check.py \
+  --json "$B1_FINAL_RETRY_OUT/message-check.json" \
+  "$B1_FINAL_RETRY_OUT" "$CANTON_EVIDENCE_DIR"
+```
