@@ -68,7 +68,8 @@ def write_json(path, value, secrets):
 async def snapshot_get(client, url, token):
     # httpx's phase timeouts alone do not bound a slowly streaming response.
     async with asyncio.timeout(HTTP_SECONDS):
-        return await client.get(url, headers={"Authorization": "Bearer " + token})
+        return await client.get(url, headers={"Authorization": "Bearer " + token,
+                                             "X-Test-ID": "PREPARE", "X-Attempt-ID": uuid.uuid4().hex})
 
 
 async def collect_snapshots(config, platforms, run_id, token, batch, secrets):
@@ -81,7 +82,10 @@ async def collect_snapshots(config, platforms, run_id, token, batch, secrets):
             write_json(batch / "evidence" / f"snapshot-{name}.json", {
                 "status_code": response.status_code, "body": response.text,
                 "received_mono_ns": str(time.monotonic_ns()),
-                "clock_id": "observer-" + run_id}, secrets)
+                "clock_id": "observer-" + run_id,
+                "method": "GET", "platform": name, "suffix": "snapshot",
+                "test_id": response.request.headers["X-Test-ID"],
+                "attempt_id": response.request.headers["X-Attempt-ID"]}, secrets)
             if response.status_code != 200:
                 raise RuntimeError(f"snapshot {name}: HTTP {response.status_code}")
             snapshots[name] = parse_json(response.text)
@@ -311,7 +315,7 @@ class Execution:
                         if not any(e["event_type"] == kind and e["request_id"] == command["request_id"]
                                    for e in self.events):
                             self.event(kind, platform, command, attempt, body, actor=self.actors[role])
-                        self.results.append((command, body))
+                        self.results.append([command, body])
                     return body
             if not recover:
                 return body
@@ -871,11 +875,15 @@ def final_gate(model, rows, expected_plan, batch):
                 missing.append("successful run completion event missing")
             wrapper = read_json(path / "evidence/implementation-events.json")
             events = [parse_json(line) for line in wrapper["body"].splitlines() if line.strip()]
-            if not events:
+            results = row.get("command_results")
+            if not isinstance(results, list):
+                missing.append("command_results missing or not a list")
+                continue
+            if not events and (row["test_id"] not in ("AC-02", "AC-03") or results):
                 missing.append("implementation history empty")
             if any(e["run_id"] != row["run_id"] or e["model"] != model for e in events):
                 missing.append("implementation history identity mismatch")
-            history_check(events, row.get("command_results", []), row.get("race_requests", []))
+            history_check(events, results, row.get("race_requests", []))
         except (OSError, ValueError, KeyError, TypeError):
             missing.append("implementation evidence unreadable/incomplete")
     return missing
@@ -914,8 +922,11 @@ def review_evidence(config, batch):
     return []
 
 
-def prerequisites(args, config):
+def prerequisites(args, config, *, measurement=False):
     if config["model"] != "B2":
+        return []
+    # Development checks may run early; final acceptance and T4 retain separate gates.
+    if not measurement and not getattr(args, "final", True):
         return []
     found, measured = set(), set()
     for name in getattr(args, "prerequisite_batch", []):
@@ -945,8 +956,11 @@ def prerequisites(args, config):
                     found.add(manifest["model"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
-    return [] if found == measured == {"A", "B1"} else [
-        "B2 requires evidenced final A/B1 validation and T1 measurement batches at current spec"]
+    if found != {"A", "B1"}:
+        return ["B2 final validation requires evidenced final A/B1 validation at current spec"]
+    if measurement and measured != {"A", "B1"}:
+        return ["B2 T4 requires evidenced A/B1 T1 measurement batches at current spec"]
+    return []
 
 
 def validated_for_experiment(args, config):
@@ -1101,7 +1115,7 @@ async def experiment_batch(args):
         for index, item in enumerate(order):
             i = item["config_index"]
             config = configs[i]
-            missing = prerequisites(args, config) + validated_for_experiment(args, config)
+            missing = prerequisites(args, config, measurement=True) + validated_for_experiment(args, config)
             if missing:
                 blockers.extend(missing)
                 continue

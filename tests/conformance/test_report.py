@@ -1,8 +1,10 @@
 import hashlib
+import csv
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from checks import ROOT, CheckError, read_json
 from report import durations, nearest_rank, report_batch, summary_rows
@@ -21,6 +23,32 @@ def timing_events():
 
 
 class ReportTests(unittest.TestCase):
+    def test_harness_hops_have_distinct_labels_without_changing_message_counts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            batch = Path(temp)
+            evidence = batch / "run/evidence"
+            evidence.mkdir(parents=True)
+            (batch / "manifest.json").write_text(json.dumps({"scope": "conformance", "model": "B1", "synthetic": True}))
+            (batch / "checks.json").write_text(json.dumps({"runs": [dict(model="B1", run_id="run-msg",
+                test_id="AC-01", variant="normal", repeat=1, path="run", verdict="PASS")]}))
+            (evidence / "call-0001.json").write_text(json.dumps({"status_code": 200}))
+            request = {"event_type": "MESSAGE_SENT", "message_category": "HARNESS",
+                       "message_kind": "REQUEST", "message_id": "snapshot:1:req"}
+            response = dict(request, event_type="MESSAGE_RECEIVED", message_kind="RESPONSE", message_id="snapshot:1:res")
+            (evidence / "implementation-events.json").write_text(json.dumps({
+                "body": "\n".join(json.dumps(event) for event in (request, request, response))}))
+            before = {p: p.read_bytes() for p in batch.rglob('*') if p.is_file()}
+            with patch("report.plot_figures"):
+                report_batch(batch)
+            with (batch / "complexity.csv").open() as source:
+                rows = [r for r in csv.DictReader(source) if r["metric"] == "N_message"]
+            counts = {r["kind"]: int(r["value"]) for r in rows}
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(counts, {"HARNESS/REQUEST": 1, "HARNESS/RESPONSE": 1,
+                                     "HARNESS/IMPLEMENTATION/REQUEST": 1, "HARNESS/IMPLEMENTATION/RESPONSE": 1})
+            for path, data in before.items():
+                self.assertEqual(path.read_bytes(), data)
+
     def test_per_run_intervals_and_clock_boundary(self):
         events = timing_events()
         self.assertEqual(durations(events), {"T_A": 5, "T_W": 3, "T_C": 12, "T_E": 20})

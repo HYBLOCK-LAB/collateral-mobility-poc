@@ -291,6 +291,13 @@ def check_result(body, run_id, command, actor, status, replay=None):
 
 def history_check(events, commands, race_requests=()):
     """Require per-request internal effects and monotone rights on each producer clock."""
+    if not isinstance(commands, (list, tuple)):
+        raise CheckError("command/result evidence must be a sequence of pairs")
+    for pair in commands:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise CheckError("invalid command/result evidence pair")
+        validate(pair[0], "command.schema.json")
+        validate(pair[1], "result.schema.json")
     for event in events:
         validate(event, "event.schema.json")
     seen_ids = set()
