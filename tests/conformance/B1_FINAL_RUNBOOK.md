@@ -23,19 +23,25 @@ B1_FINAL_CONNECTION_COMMIT="$(git rev-parse FETCH_HEAD)"
 export B1_FINAL_CONNECTION_COMMIT
 git switch --detach 4b827d661551ef63033b76da401b273135aa2bdf || exit 1
 git restore --source="$B1_FINAL_CONNECTION_COMMIT" --worktree -- \
+  AGENTS.md README.md spec/business.md spec/interface.md spec/acceptance.md spec/measurement.md \
   implementations/canton/prepare.py \
   tests/conformance/runner.py tests/conformance/checks.py tests/conformance/report.py \
   tests/conformance/test_runner.py tests/conformance/test_history.py \
   tests/conformance/test_report.py tests/conformance/test_canton_connection.py \
+  tests/conformance/test_reassignment.py tests/conformance/test_batch.py \
   tests/conformance/b1_final_context.py tests/conformance/test_b1_final_context.py \
   tests/conformance/config.b1.xyz.example.json \
   tests/conformance/B1_XYZ_RUNBOOK.md tests/conformance/B1_FINAL_RUNBOOK.md \
   tests/conformance/baselines/model-b1-xyz-review-20261123.md \
-  tests/conformance/README.md tests/conformance/EXPERIMENT_HANDOFF.md || exit 1
+  tests/conformance/README.md tests/conformance/EXPERIMENT_HANDOFF.md \
+  tests/conformance/IMPLEMENTATION_HANDOFF.md || exit 1
 ```
 
 오류가 나면 중단한다. 새 도구·문서가 없으면 아직 최종 준비 버전이 게시되지 않은 것이다.
 실제 연결 SHA는 공유 메시지에 적힌 SHA와 대조한다. 이후 브랜치가 움직여도 이 값을 유지한다.
+이번 B2 조기 개발 승인으로 명세·실행기의 선행 조건이 갱신됐다. 과거 `a7cd3cd`만
+적용하지 않고, 위 공통 명세를 포함한 게시된 최신 조합으로 최종 검증한다.
+과거 원본·판정은 보존하며 새 명세의 최종 통과로 소급하지 않는다.
 
 ## 2. 새 환경 기동
 

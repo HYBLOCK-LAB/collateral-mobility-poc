@@ -10,11 +10,37 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from checks import ROOT, CheckError, EvidenceMissing, read_json
-from runner import execute_case, experiment_batch, validated_for_experiment
+from runner import check_batch, execute_case, experiment_batch, validated_for_experiment
 from test_runner import PREPARE, snapshot
 
 
 class BatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_b2_development_runs_but_cannot_become_final_without_a_b1(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = read_json(ROOT / "tests/conformance/config.example.json")
+            config["model"] = "B2"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config))
+            args = Namespace(config=str(config_path), model="B2", output=temp, stage="xyz",
+                             case=["AC-01"], final=False, prerequisite_batch=[])
+
+            async def execute(args, config, case, batch, index):
+                return dict(case, model="B2", run_id="self-test-development", path="run",
+                            verdict="PASS", body_started=True)
+
+            with patch("runner.execute_case", new=AsyncMock(side_effect=execute)) as run, patch(
+                    "runner.append_run_events"), patch("report.report_batch"), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(await check_batch(args), 0)
+                run.assert_awaited_once()
+                development = read_json(next(root.glob("batch-*/checks.json")))
+                self.assertFalse(development["final_handoff_eligible"])
+                self.assertEqual(development["blockers"], [])
+                run.reset_mock()
+                args.final, args.case = True, None
+                self.assertEqual(await check_batch(args), 1)
+                run.assert_not_awaited()
+
     async def test_failed_scenario_still_exports_history_and_keeps_original_reason(self):
         for error, verdict in ((CheckError("original business failure"), "FAIL"),
                                (EvidenceMissing("original observation failure"), "INCONCLUSIVE"),

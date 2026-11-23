@@ -922,8 +922,11 @@ def review_evidence(config, batch):
     return []
 
 
-def prerequisites(args, config):
+def prerequisites(args, config, *, measurement=False):
     if config["model"] != "B2":
+        return []
+    # Development checks may run early; final acceptance and T4 retain separate gates.
+    if not measurement and not getattr(args, "final", True):
         return []
     found, measured = set(), set()
     for name in getattr(args, "prerequisite_batch", []):
@@ -953,8 +956,11 @@ def prerequisites(args, config):
                     found.add(manifest["model"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
-    return [] if found == measured == {"A", "B1"} else [
-        "B2 requires evidenced final A/B1 validation and T1 measurement batches at current spec"]
+    if found != {"A", "B1"}:
+        return ["B2 final validation requires evidenced final A/B1 validation at current spec"]
+    if measurement and measured != {"A", "B1"}:
+        return ["B2 T4 requires evidenced A/B1 T1 measurement batches at current spec"]
+    return []
 
 
 def validated_for_experiment(args, config):
@@ -1109,7 +1115,7 @@ async def experiment_batch(args):
         for index, item in enumerate(order):
             i = item["config_index"]
             config = configs[i]
-            missing = prerequisites(args, config) + validated_for_experiment(args, config)
+            missing = prerequisites(args, config, measurement=True) + validated_for_experiment(args, config)
             if missing:
                 blockers.extend(missing)
                 continue
