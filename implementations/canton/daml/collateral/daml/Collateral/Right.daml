@@ -2,8 +2,8 @@
 -- right contract: {bundle_id}:right:{version}. A confirmed transaction
 -- consumes the current right and creates the next one for the counterparty.
 -- The holder and the cosigner, the party that passed the right on, both sign,
--- so neither creates, archives or consumes a right alone (README §3 lists the
--- joint paths this leaves).
+-- so neither creates, archives, consumes or locks a right alone (README §3
+-- lists the joint paths this leaves).
 module Collateral.Right where
 
 import Collateral.Types
@@ -38,3 +38,17 @@ template UseRight
         assertMsg "the next holder is the holder" (nextHolder /= holder)
         assertMsg "the right is not available" (status == AVAILABLE)
         create this with status = CONSUMED; allowedCommands = []
+
+    -- Replaces the right with its locked form when the holder allocates the
+    -- bundle as CCP margin (README §3): the same right ID, LOCKED, no allowed
+    -- command. The locking party authorizes too, so the holder cannot lock
+    -- the right alone; AllocateMargin carries the CCP's authority from its
+    -- signature on the margin call.
+    choice Lock : ContractId UseRight
+      with
+        locker : Party
+      controller holder, locker
+      do
+        assertMsg "the locker is the holder" (locker /= holder)
+        assertMsg "the right is not available" (status == AVAILABLE)
+        create this with status = LOCKED; allowedCommands = []

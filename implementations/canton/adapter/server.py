@@ -1,8 +1,9 @@
 """Platform adapter of the Canton B1 model (implementations/canton/README.md §2).
 
-One process per platform: X (Repo, on participant P_X) and Y (securities
-lending, on P_Y). It serves the common HTTP interface (spec/interface.md §4)
-and reaches its participant through the JSON Ledger API v2 on localhost.
+One process per platform: X (Repo, on participant P_X), Y (securities
+lending, on P_Y) and Z (CCP margin, on P_Z). It serves the common HTTP
+interface (spec/interface.md §4) and reaches its participant through the JSON
+Ledger API v2 on localhost.
 
 Stage 1: start-up (DAR upload, warm-up transaction), Bearer authentication,
 request validation against shared/schemas, platform permissions, the error
@@ -20,6 +21,12 @@ id conflicts, contention and recovery. Committed requests are kept by the
 ledger (the trade contract names its request); rejected requests are kept in
 $CANTON_STATE_DIR/requests/<platform>/<run_id>.jsonl; requests in progress
 and submissions whose ledger answer was lost are kept in this process only.
+
+Z (README §3 "Z: CCP 증거금 배정·잠금"): ALLOCATE_MARGIN on Z exercises the
+margin call's choice, which locks BANK_C's right in place, creates the
+allocation and satisfies the margin call; the Z readiness and the snapshot's
+margin calls and allocations. The ledger must have been bootstrapped with the
+b1-xyz topology (ids.json); the adapter refuses to start on another one.
 
     .venv/bin/python -I adapter/server.py --platform X
 
@@ -63,8 +70,11 @@ from jsonschema import Draft202012Validator
 
 IMPL_DIR = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = IMPL_DIR.parent.parent / "shared/schemas"
-DAR = IMPL_DIR / "daml/collateral/.daml/dist/collateral-0.3.0.dar"
+DAR = IMPL_DIR / "daml/collateral/.daml/dist/collateral-0.4.0.dar"
 PACKAGE = "collateral"
+# The ledger topology this DAR and PLATFORMS belong to (ids.json, written by
+# canton/bootstrap-b1-xy.canton). The X→Y evidence ledgers are "b1-xy".
+TOPOLOGY = "b1-xyz"
 WARMUP_TEMPLATE = f"#{PACKAGE}:Collateral.Warmup:Warmup"
 # Business templates by module:entity (README §3). The ledger reports a
 # contract's template as <package id>:<module>:<entity>.
@@ -73,6 +83,8 @@ REPO_AGREEMENT = "Collateral.Agreement:RepoAgreement"
 LOAN_AGREEMENT = "Collateral.Agreement:LoanAgreement"
 TRADE = "Collateral.Record:TradeContract"
 OBLIGATION = "Collateral.Record:Obligation"
+MARGIN_CALL = "Collateral.Margin:MarginCall"
+ALLOCATION = "Collateral.Margin:Allocation"
 WARMUP_COUNT = 2
 VETTING_TIMEOUT = 60  # seconds for every participant's vetting to reach S1
 LEDGER_TIMEOUT = ClientTimeout(total=60)
@@ -151,27 +163,54 @@ PLATFORMS = {
         "hosted": ("BANK_B", "BANK_C"),
         "prepared_by": (LOAN_AGREEMENT,),
     },
+    "Z": {
+        "participant": "P_Z",
+        "port": 8203,
+        "warmup": "BANK_C",
+        "commands": {"ALLOCATE_MARGIN": "BANK_C"},
+        "readiness": "margin_call_id",
+        "hosted": ("BANK_C", "CCP"),
+        "prepared_by": (MARGIN_CALL,),
+    },
 }
 
 
 class Confirmation(NamedTuple):
-    agreement: str  # template of the pre-agreement the trade is confirmed under
+    """How a command is carried out on the ledger: the choice exercised on a
+    prepared contract and the record contract the choice creates."""
+
+    agreement: str  # template of the prepared contract (pre-agreement, margin call)
     choice: str
-    record_key: str  # payload key naming the new trade
+    reference: str  # payload key naming that contract (and the readiness key)
+    reference_field: str  # its field in that contract and in the record
+    record_key: str  # payload key naming the new record
     record_argument: str  # the choice argument that carries it
-    record_type: str  # common record_type and TradeContract.contractType
-    controller: str  # agreement field naming the party that may confirm
+    record_type: str  # common record_type
+    record: str  # template of the record contract
+    record_field: str  # the record contract's field naming it
+    controller: str  # field of the prepared contract naming the submitter
+
+    def made(self, arg: dict) -> bool:
+        """Whether a record contract was created by this command: trade
+        contracts of both kinds share one template."""
+        return self.record != TRADE or arg["contractType"] == self.record_type
 
 
 CONFIRMATIONS = {
     "CONFIRM_REPO": Confirmation(
-        REPO_AGREEMENT, "ConfirmRepo", "repo_id", "repoId", "REPO", "seller"
+        REPO_AGREEMENT, "ConfirmRepo", "agreement_id", "agreementId",
+        "repo_id", "repoId", "REPO", TRADE, "tradeId", "seller",
     ),
     "CONFIRM_LOAN": Confirmation(
-        LOAN_AGREEMENT, "ConfirmLoan", "loan_id", "loanId", "LOAN", "lender"
+        LOAN_AGREEMENT, "ConfirmLoan", "agreement_id", "agreementId",
+        "loan_id", "loanId", "LOAN", TRADE, "tradeId", "lender",
+    ),
+    "ALLOCATE_MARGIN": Confirmation(
+        MARGIN_CALL, "AllocateMargin", "margin_call_id", "marginCallId",
+        "allocation_id", "allocationId", "ALLOCATION", ALLOCATION, "allocationId",
+        "provider",
     ),
 }
-COMMAND_OF_RECORD = {c.record_type: kind for kind, c in CONFIRMATIONS.items()}
 # HTTP status of the pre-acceptance and query errors (interface §13). An
 # unexpected adapter error means the result cannot be determined now: 503, the
 # status tests/conformance/checks.py check_result expects for INTERNAL_ERROR.
@@ -257,9 +296,9 @@ class Active(NamedTuple):
 
 
 class Verdict(NamedTuple):
-    """The adapter's check of a new request against the run's state, in the
-    order of the confirmation choice (Collateral.Agreement): a business
-    rejection code, or the agreement and right the transaction would use."""
+    """The adapter's check of a new request against the run's state (README
+    §3): a business rejection code, or the prepared contract (pre-agreement
+    or margin call) and the right the transaction would use."""
 
     code: str | None
     message: str = ""
@@ -294,19 +333,26 @@ def canonical(command: dict) -> str:
     )
 
 
-def trade_matches(trade: dict, command: dict) -> bool:
-    """Whether the trade contract a request confirmed has the content of the
-    command (command.schema: every field is fixed by the trade contract)."""
-    confirmation = CONFIRMATIONS.get(command["command_type"])
+class Record(NamedTuple):
+    """The record contract (trade or allocation) a request committed."""
+
+    kind: str  # the command type that created it
+    arg: dict  # its create argument
+
+
+def record_matches(record: Record, command: dict) -> bool:
+    """Whether the record a request committed has the content of the command
+    (command.schema: every field is fixed by the record contract)."""
+    confirmation = CONFIRMATIONS[record.kind]
+    arg = record.arg
     return (
-        confirmation is not None
-        and trade["contractType"] == confirmation.record_type
-        and trade["bundleId"] == command["bundle_id"]
-        and int(trade["versionBefore"]) == int(command["expected_version"])
+        command["command_type"] == record.kind
+        and arg["bundleId"] == command["bundle_id"]
+        and int(arg["versionBefore"]) == int(command["expected_version"])
         and command["payload"]
         == {
-            "agreement_id": trade["agreementId"],
-            confirmation.record_key: trade["tradeId"],
+            confirmation.reference: arg[confirmation.reference_field],
+            confirmation.record_key: arg[confirmation.record_field],
         }
     )
 
@@ -360,6 +406,16 @@ def bundle_row(bundle: dict, version: int) -> dict:
     }
 
 
+def bundle_version(right: dict) -> int:
+    """The bundle version a right shows. A consumed right means the transaction
+    that consumed it raised the bundle to the next version, even when the
+    successor is not visible; a locked right was raised in place by the margin
+    allocation (README §3)."""
+    return int(right["createdVersion"]) + (
+        1 if right["status"] in ("CONSUMED", "LOCKED") else 0
+    )
+
+
 def target_row(target: dict) -> dict:
     """Collateral.Types.ObligationTarget (a variant) as an obligation target."""
     value = target["value"]
@@ -403,7 +459,7 @@ def parse_json(raw: bytes):
 class EventLog:
     """Implementation events of one adapter process: one producer, one clock.
 
-    Lines go to <root>/<run_id>/events.jsonl, which the X and Y processes share,
+    Lines go to <root>/<run_id>/events.jsonl, which the X, Y and Z processes share,
     hence O_APPEND under flock. The time, the sequence number and the write
     happen without an await in between, so on the single event-loop thread no
     other request can take a later time with an earlier sequence. The line is
@@ -461,6 +517,13 @@ class Adapter:
             raise SystemExit("CANTON_STATE_DIR not set (source scripts/env.sh)")
         self.state_dir = Path(state_dir)
         ids = json.loads((self.state_dir / "ids.json").read_text())
+        # Checked before anything is uploaded: the X→Y evidence ledgers keep
+        # the package version their evidence was produced with (README §4).
+        if ids.get("topology") != TOPOLOGY:
+            raise SystemExit(
+                f"{self.state_dir} holds a {ids.get('topology')} ledger, not "
+                f"{TOPOLOGY}: start it from the commit that bootstrapped it (README §4)"
+            )
         self.ledger_url = ids["json_api"][self.spec["participant"]]
         self.parties = ids["parties"]
         self.names = {party: name for name, party in self.parties.items()}
@@ -545,7 +608,15 @@ class Adapter:
         """
         found: dict[str, list[Active]] = {
             entity: []
-            for entity in (RIGHT, REPO_AGREEMENT, LOAN_AGREEMENT, TRADE, OBLIGATION)
+            for entity in (
+                RIGHT,
+                REPO_AGREEMENT,
+                LOAN_AGREEMENT,
+                TRADE,
+                OBLIGATION,
+                MARGIN_CALL,
+                ALLOCATION,
+            )
         }
         seen: set[str] = set()
         query: dict[str, object] = {
@@ -650,9 +721,9 @@ class Adapter:
 
     async def wait_vetted(self) -> None:
         """A transaction is refused unless every participant hosting one of its
-        informees has vetted the package. BANK_B is on P_X and P_Y, and each
-        adapter uploads only to its own participant, so the two adapters wait
-        here for each other's upload instead of racing."""
+        informees has vetted the package. BANK_B is on P_X and P_Y, BANK_C on
+        P_Y and P_Z, and each adapter uploads only to its own participant, so
+        the adapters wait here for each other's upload instead of racing."""
         query = {
             "packageMetadataFilter": {"packageIds": [self.package_id]},
             "topologyStateFilter": {"synchronizerIds": [self.synchronizer]},
@@ -682,7 +753,7 @@ class Adapter:
             if time.monotonic() > deadline:
                 raise SystemExit(
                     f"package {self.package_id[:12]} not vetted on S1 by {missing} "
-                    f"after {VETTING_TIMEOUT}s (is the other adapter starting?)"
+                    f"after {VETTING_TIMEOUT}s (are the other adapters starting?)"
                 )
             await asyncio.sleep(0.5)
 
@@ -786,22 +857,24 @@ class Adapter:
             "contract_id": event["contractId"],
         }
 
-    def result_of(self, run_id: str, trade: dict, replayed: bool) -> dict:
-        """The COMMITTED result (interface §6.1) of the request that confirmed the
-        trade, from the trade contract the confirmation created."""
+    def result_of(self, run_id: str, record: Record, replayed: bool) -> dict:
+        """The COMMITTED result (interface §6.1) of the request that created the
+        record (trade or allocation), from the record contract itself."""
+        confirmation = CONFIRMATIONS[record.kind]
+        arg = record.arg
         return {
             "run_id": run_id,
-            "request_id": trade["requestId"],
-            "actor": self.name_of(trade["actor"]),
-            "command_type": COMMAND_OF_RECORD[trade["contractType"]],
+            "request_id": arg["requestId"],
+            "actor": self.name_of(arg["actor"]),
+            "command_type": record.kind,
             "outcome": "COMMITTED",
             "replayed": replayed,
             "effect": {
-                "bundle_id": trade["bundleId"],
-                "version_before": int(trade["versionBefore"]),
-                "version_after": int(trade["versionAfter"]),
-                "record_type": trade["contractType"],
-                "record_id": trade["tradeId"],
+                "bundle_id": arg["bundleId"],
+                "version_before": int(arg["versionBefore"]),
+                "version_after": int(arg["versionAfter"]),
+                "record_type": confirmation.record_type,
+                "record_id": arg[confirmation.record_field],
             },
             "error": None,
         }
@@ -839,25 +912,27 @@ class Adapter:
             (record["code"], record["message"]),
         )
 
-    def trade_of(
+    def record_of(
         self, found: dict[str, list[Active]], actor: str, request_id: str
-    ) -> dict | None:
-        """The trade contract a request of this platform confirmed, if any.
+    ) -> Record | None:
+        """The record contract (trade or allocation) a request of this platform
+        created, if any.
 
         Requests are kept per (run, authenticated actor, request id) on the
         platform they were submitted to (interface §6.3)."""
-        trades = [
-            c.arg
-            for c in found[TRADE]
-            if c.arg["requestId"] == request_id
+        records = [
+            Record(kind, c.arg)
+            for kind in self.commands
+            for c in found[CONFIRMATIONS[kind].record]
+            if CONFIRMATIONS[kind].made(c.arg)
+            and c.arg["requestId"] == request_id
             and c.arg["actor"] == self.parties[actor]
-            and COMMAND_OF_RECORD[c.arg["contractType"]] in self.commands
         ]
-        if len(trades) > 1:
+        if len(records) > 1:
             raise preparation_conflict(
-                f"request {request_id} confirmed more than one trade"
+                f"request {request_id} created more than one record"
             )
-        return trades[0] if trades else None
+        return records[0] if records else None
 
     # --- request records (interface §6.3) ---------------------------------
 
@@ -934,7 +1009,8 @@ class Adapter:
 
     def snapshot_of(self, run_id: str, found: dict[str, list[Active]]) -> dict:
         """Normalised records this participant sees (interface §8, snapshot
-        schema). The pre-agreements are preparation data, not records."""
+        schema). The pre-agreements are preparation data, not records; the
+        margin calls are listed, as common.schema has a row for them."""
         rights = sorted(
             (self.right_row(c.arg) for c in found[RIGHT]),
             key=lambda row: (row["bundle_id"], row["created_version"]),
@@ -942,11 +1018,7 @@ class Adapter:
         bundles: dict[str, dict] = {}
         for contract in found[RIGHT]:
             arg = contract.arg
-            # A consumed right means the transaction that consumed it raised the
-            # bundle to the next version, even when the successor is not visible.
-            version = int(arg["createdVersion"]) + (
-                1 if arg["status"] == "CONSUMED" else 0
-            )
+            version = bundle_version(arg)
             known = bundles.get(arg["bundle"]["bundleId"])
             if known is None or version > known["version"]:
                 bundles[arg["bundle"]["bundleId"]] = bundle_row(arg["bundle"], version)
@@ -974,6 +1046,30 @@ class Adapter:
             }
             for a in (c.arg for c in found[OBLIGATION])
         ]
+        margin_calls = [
+            {
+                "margin_call_id": a["marginCallId"],
+                "provider": self.name_of(a["provider"]),
+                "ccp": self.name_of(a["ccp"]),
+                "bundle_id": a["bundleId"],
+                "whole_bundle_accepted": a["wholeBundleAccepted"],
+                "eligibility_passed": a["eligibilityPassed"],
+                "status": a["status"],
+            }
+            for a in (c.arg for c in found[MARGIN_CALL])
+        ]
+        allocations = [
+            {
+                "allocation_id": a["allocationId"],
+                "margin_call_id": a["marginCallId"],
+                "bundle_id": a["bundleId"],
+                "provider": self.name_of(a["provider"]),
+                "ccp": self.name_of(a["ccp"]),
+                # An active allocation keeps the right locked (Collateral.Margin).
+                "status": "LOCKED",
+            }
+            for a in (c.arg for c in found[ALLOCATION])
+        ]
         seq = self.snapshot_seq.get(run_id, 0)
         self.snapshot_seq[run_id] = seq + 1
         return {
@@ -984,9 +1080,8 @@ class Adapter:
             "rights": rights,
             "contracts": sorted(contracts, key=lambda row: row["contract_id"]),
             "obligations": sorted(obligations, key=lambda row: row["obligation_id"]),
-            # Z (margin calls, CCP allocation) is not part of B1 X→Y.
-            "margin_calls": [],
-            "allocations": [],
+            "margin_calls": sorted(margin_calls, key=lambda row: row["margin_call_id"]),
+            "allocations": sorted(allocations, key=lambda row: row["allocation_id"]),
             "pending_operations": self.pending_of_run(run_id, found),
         }
 
@@ -1015,7 +1110,7 @@ class Adapter:
             for key, command in self.unknown.items()
             if key[0] == run_id
             and key not in self.inflight
-            and self.trade_of(found, key[1], key[2]) is None
+            and self.record_of(found, key[1], key[2]) is None
             and self.may_commit(found, key, command)
         ]
         return sorted(rows, key=lambda row: row["request_id"])
@@ -1041,6 +1136,8 @@ class Adapter:
         conditions again inside the transaction. ConfirmLoan's cosigner check
         is left to the ledger: a right the borrower cosigned only comes from a
         joint Ledger API submission, and its refusal is answered 503 (README §3)."""
+        if command["command_type"] == "ALLOCATE_MARGIN":
+            return self.judge_margin(found, command, role)
         confirmation = CONFIRMATIONS[command["command_type"]]
         payload, bundle_id = command["payload"], command["bundle_id"]
         agreements = [
@@ -1096,6 +1193,90 @@ class Adapter:
                 "USE_NOT_PERMITTED", "the right does not permit this command"
             )
         return Verdict(None, agreement=agreement, right=right)
+
+    def judge_margin(
+        self, found: dict[str, list[Active]], command: dict, role: str
+    ) -> Verdict:
+        """Check an ALLOCATE_MARGIN request in the rejection order of README §3
+        (the order Model A answers in). AllocateMargin checks the margin call,
+        the right and the version again inside the transaction; the CCP
+        cosigner check is left to the ledger, like ConfirmLoan's."""
+        payload, bundle_id = command["payload"], command["bundle_id"]
+        rights = [c for c in found[RIGHT] if c.arg["bundle"]["bundleId"] == bundle_id]
+        user = self.parties[role]
+        if not rights:
+            # The loan has not reached this participant (yet).
+            return Verdict(
+                "PRECONDITION_NOT_MET",
+                "the bundle is not known on this platform",
+                absent=True,
+            )
+        if any(c.arg["status"] == "LOCKED" for c in rights):
+            return Verdict(
+                "RIGHT_UNAVAILABLE", "the bundle is already allocated to a margin call"
+            )
+        calls = [
+            c
+            for c in found[MARGIN_CALL]
+            if c.arg["marginCallId"] == payload["margin_call_id"]
+            and c.arg["bundleId"] == bundle_id
+        ]
+        if not calls:
+            return Verdict("PRECONDITION_NOT_MET", "no margin call for the bundle")
+        if len(calls) > 1:
+            raise preparation_conflict("more than one margin call for the bundle")
+        call = calls[0]
+        if call.arg["status"] != "OPEN" or call.arg["provider"] != user:
+            return Verdict(
+                "PRECONDITION_NOT_MET", "the margin call is not open for the actor"
+            )
+        if not (call.arg["wholeBundleAccepted"] and call.arg["eligibilityPassed"]):
+            return Verdict(
+                "COLLATERAL_NOT_ELIGIBLE", "the bundle is not eligible as margin"
+            )
+        if any(
+            c.arg["allocationId"] == payload["allocation_id"]
+            for c in found[ALLOCATION]
+        ):
+            return Verdict(
+                "PRECONDITION_NOT_MET", "the allocation id is already used"
+            )
+        held = [c for c in rights if c.arg["holder"] == user]
+        if not held:
+            # The loan has not given the actor a right on this participant (yet).
+            return Verdict(
+                "PRECONDITION_NOT_MET",
+                "the actor holds no right of the bundle",
+                absent=True,
+            )
+        available = [c for c in held if c.arg["status"] == "AVAILABLE"]
+        if not available:
+            return Verdict(
+                "RIGHT_UNAVAILABLE", "the actor holds no available right of the bundle"
+            )
+        if len(available) > 1:
+            raise preparation_conflict("the actor holds more than one available right")
+        right = available[0]
+        if int(right.arg["createdVersion"]) != int(command["expected_version"]):
+            return Verdict(
+                "VERSION_CONFLICT", "the bundle version is not the expected one"
+            )
+        loans = [
+            c
+            for c in found[TRADE]
+            if c.arg["contractType"] == "LOAN"
+            and c.arg["tradeId"] == right.arg.get("sourceRecordId")
+            and int(c.arg["versionAfter"]) == int(right.arg["createdVersion"])
+        ]
+        if not loans:
+            return Verdict(
+                "PRECONDITION_NOT_MET", "the right does not come from the bundle's loan"
+            )
+        if command["command_type"] not in right.arg["allowedCommands"]:
+            return Verdict(
+                "USE_NOT_PERMITTED", "the right does not permit this command"
+            )
+        return Verdict(None, agreement=call, right=right)
 
     async def answer(
         self, key: tuple[str, str, str], command: dict, test_id: str, fields: dict
@@ -1179,17 +1360,17 @@ class Adapter:
         run_id, role, request_id = key
         kind = command["command_type"]
         content = canonical(command)
-        record = self.rejections_of(run_id).get((role, request_id))
-        if record is not None:
-            if record["content"] != content:
+        rejection = self.rejections_of(run_id).get((role, request_id))
+        if rejection is not None:
+            if rejection["content"] != content:
                 raise self.conflict(request_id)
-            return 200, self.rejected_of(record, replayed=True)
+            return 200, self.rejected_of(rejection, replayed=True)
         found = await self.prepared_run(run_id)
-        trade = self.trade_of(found, role, request_id)
-        if trade is not None:
-            if not trade_matches(trade, command):
+        record = self.record_of(found, role, request_id)
+        if record is not None:
+            if not record_matches(record, command):
                 raise self.conflict(request_id)
-            return 200, self.result_of(run_id, trade, replayed=True)
+            return 200, self.result_of(run_id, record, replayed=True)
         earlier = self.unknown.get(key)
         if earlier is not None and canonical(earlier) != content:
             raise self.conflict(request_id)
@@ -1201,11 +1382,11 @@ class Adapter:
                 await asyncio.sleep(LOCAL_POLL)
                 found = await self.prepared_run(run_id)
                 reads += 1
-                trade = self.trade_of(found, role, request_id)
-                if trade is not None:
-                    if not trade_matches(trade, command):
+                record = self.record_of(found, role, request_id)
+                if record is not None:
+                    if not record_matches(record, command):
                         raise self.conflict(request_id)
-                    return 200, self.result_of(run_id, trade, replayed=True)
+                    return 200, self.result_of(run_id, record, replayed=True)
                 verdict = self.judge(found, command, role)
             log.info(
                 "%s %s %s: no right of the bundle on the first read; after %d reads: %s",
@@ -1304,7 +1485,7 @@ class Adapter:
                             del self.inflight[key]
                         sent = confirmed = True
                         try:
-                            trade = await self.committed(
+                            record = await self.committed(
                                 run_id, test_id, command, verdict, reply, fields
                             )
                         except Exception:
@@ -1323,7 +1504,7 @@ class Adapter:
                             self.inflight[key] = submission
                         else:
                             self.unknown.pop(key, None)
-                            return 200, self.result_of(run_id, trade, replayed)
+                            return 200, self.result_of(run_id, record, replayed)
                     else:
                         code, firm = ledger_code(reply), firm_refusal(reply)
                         log.warning(
@@ -1417,11 +1598,11 @@ class Adapter:
                     "%s %s: state not read: %s", run_id, request_id, refusal.message
                 )
             else:
-                trade = self.trade_of(found, role, request_id)
-                if trade is not None:
-                    if not trade_matches(trade, command):
+                record = self.record_of(found, role, request_id)
+                if record is not None:
+                    if not record_matches(record, command):
                         raise self.conflict(request_id)
-                    return 200, self.result_of(run_id, trade, replayed)
+                    return 200, self.result_of(run_id, record, replayed)
                 verdict = self.judge(found, command, role) if judge else None
                 if verdict and verdict.code is not None and not verdict.absent:
                     return self.reject(key, command, verdict.code, verdict.message)
@@ -1437,11 +1618,12 @@ class Adapter:
         verdict: Verdict,
         reply: dict,
         fields: dict,
-    ) -> dict:
+    ) -> Record:
         """Log what the committed transaction actually created (README §3, §4)
-        and return the trade contract's argument."""
+        and return the record contract (trade or allocation) it created."""
         kind = command["command_type"]
-        record_id = command["payload"][CONFIRMATIONS[kind].record_key]
+        confirmation = CONFIRMATIONS[kind]
+        record_id = command["payload"][confirmation.record_key]
         transaction = reply["transaction"]
         created = [
             e["CreatedEvent"] for e in transaction["events"] if "CreatedEvent" in e
@@ -1473,13 +1655,13 @@ class Adapter:
             command["request_id"],
             transaction["offset"],
         )
-        trade = one(TRADE, tradeId=record_id)
-        if trade is None:
-            raise ValueError("the committed transaction has no single trade contract")
+        record = one(confirmation.record, **{confirmation.record_field: record_id})
+        if record is None:
+            raise ValueError("the committed transaction has no single record contract")
         try:
-            await self.log_commit(run_id, test_id, command, verdict, trade, one, fields)
+            await self.log_commit(run_id, test_id, command, verdict, record, one, fields)
         except Exception:
-            # The trade is committed whatever happens to its events: a problem
+            # The record is committed whatever happens to its events: a problem
             # logging them leaves them out, it does not change the answer.
             log.exception(
                 "%s %s %s: events of the commit not fully logged",
@@ -1487,7 +1669,7 @@ class Adapter:
                 kind,
                 command["request_id"],
             )
-        return trade["createArgument"]
+        return Record(kind, record["createArgument"])
 
     async def log_commit(
         self,
@@ -1495,19 +1677,19 @@ class Adapter:
         test_id: str,
         command: dict,
         verdict: Verdict,
-        trade: dict,
+        record: dict,
         one,
         fields: dict,
     ) -> None:
         """The commit's events, in the order history_check requires."""
         bundle_id = command["bundle_id"]
         record_id = command["payload"][CONFIRMATIONS[command["command_type"]].record_key]
-        # The trade contract proves the commit: log it before anything else of
+        # The record contract proves the commit: log it before anything else of
         # the reply is read, so a later problem cannot drop the event.
-        version_after = int(trade["createArgument"]["versionAfter"])
+        version_after = int(record["createArgument"]["versionAfter"])
         effect = {
             "record_id": record_id,
-            "version_before": int(trade["createArgument"]["versionBefore"]),
+            "version_before": int(record["createArgument"]["versionBefore"]),
             "version_after": version_after,
         }
         self.events.write(
@@ -1515,11 +1697,35 @@ class Adapter:
             run_id,
             test_id,
             outcome="COMMITTED",
-            contract_id=trade["contractId"],
+            contract_id=record["contractId"],
             **effect,
             **fields,
         )
         # A right missing from the reply leaves its event out; it is not invented.
+        if command["command_type"] == "ALLOCATE_MARGIN":
+            # The right is locked in place: the same right ID, LOCKED, no
+            # successor (README §3).
+            locked = one(RIGHT, rightId=verdict.right.arg["rightId"], status="LOCKED")
+            if locked is None:
+                return
+            self.events.write(
+                "RIGHT_LOCKED",
+                run_id,
+                test_id,
+                record_id=record_id,
+                **self.right_event(locked),
+                **fields,
+            )
+            if await self.locally_applied(run_id, locked["contractId"]):
+                self.events.write(
+                    "LOCAL_APPLIED",
+                    run_id,
+                    test_id,
+                    contract_id=locked["contractId"],
+                    **effect,
+                    **fields,
+                )
+            return
         consumed = one(RIGHT, rightId=verdict.right.arg["rightId"], status="CONSUMED")
         successor = one(
             RIGHT, rightId=f"{bundle_id}:right:{version_after}", status="AVAILABLE"
@@ -1672,13 +1878,13 @@ class Adapter:
         for _ in range(2):
             work = self.tasks.get(key)
             busy = work is not None and not work.task.done()
-            record = self.rejections_of(run_id).get((role, request_id))
-            if record is not None:
-                return web.json_response(self.rejected_of(record, replayed=False))
+            rejection = self.rejections_of(run_id).get((role, request_id))
+            if rejection is not None:
+                return web.json_response(self.rejected_of(rejection, replayed=False))
             found = await self.prepared_run(run_id)
-            trade = self.trade_of(found, role, request_id)
-            if trade is not None:
-                return web.json_response(self.result_of(run_id, trade, replayed=False))
+            record = self.record_of(found, role, request_id)
+            if record is not None:
+                return web.json_response(self.result_of(run_id, record, replayed=False))
             work = self.tasks.get(key)
             if work is not None and not work.task.done():
                 return web.json_response(
@@ -1720,7 +1926,39 @@ class Adapter:
         # Read only (interface §7): nothing is reserved, consumed or confirmed.
         found = await self.prepared_run(run_id)
         bundle_id = query["bundle_id"]
-        agreement_id = query[self.spec["readiness"]]
+        reference = query[self.spec["readiness"]]
+        if kind == "ALLOCATE_MARGIN":
+            reasons, available = self.margin_readiness(found, bundle_id, reference, role)
+        else:
+            reasons, available = self.agreement_readiness(
+                found, kind, bundle_id, reference, role
+            )
+        reasons = list(dict.fromkeys(reasons))
+        return web.json_response(
+            {
+                "run_id": run_id,
+                "platform": self.platform,
+                "bundle_id": bundle_id,
+                "command_type": kind,
+                "ready": not reasons,
+                "observed_version": int(available[0]["createdVersion"])
+                if available
+                else None,
+                "blocking_reasons": reasons,
+            }
+        )
+
+    def agreement_readiness(
+        self,
+        found: dict[str, list[Active]],
+        kind: str,
+        bundle_id: str,
+        agreement_id: str,
+        role: str,
+    ) -> tuple[list[str], list[dict]]:
+        """Readiness of a confirmation against a pre-agreement (today only Y
+        CONFIRM_LOAN): the blocking reasons and the submitter's available
+        rights of the bundle."""
         agreements = [
             c.arg
             for c in found[CONFIRMATIONS[kind].agreement]
@@ -1755,20 +1993,63 @@ class Adapter:
             reasons.append("RIGHT_UNAVAILABLE")
         elif kind not in available[0]["allowedCommands"]:
             reasons.append("USE_NOT_PERMITTED")
-        reasons = list(dict.fromkeys(reasons))
-        return web.json_response(
-            {
-                "run_id": run_id,
-                "platform": self.platform,
-                "bundle_id": bundle_id,
-                "command_type": kind,
-                "ready": not reasons,
-                "observed_version": int(available[0]["createdVersion"])
-                if available
-                else None,
-                "blocking_reasons": reasons,
-            }
-        )
+        return reasons, available
+
+    def margin_readiness(
+        self,
+        found: dict[str, list[Active]],
+        bundle_id: str,
+        margin_call_id: str,
+        role: str,
+    ) -> tuple[list[str], list[dict]]:
+        """ALLOCATE_MARGIN readiness: every reason judge_margin would reject
+        for, in its order; VERSION_CONFLICT needs an expected version and is
+        not a readiness reason (readiness.schema)."""
+        calls = [
+            c.arg
+            for c in found[MARGIN_CALL]
+            if c.arg["marginCallId"] == margin_call_id and c.arg["bundleId"] == bundle_id
+        ]
+        if not calls:
+            # shared/README §5: a missing target is an error, not ready=false.
+            raise Refusal(
+                "NOT_FOUND",
+                f"no margin call {margin_call_id} for bundle {bundle_id} on platform "
+                f"{self.platform}",
+            )
+        if len(calls) > 1:
+            raise preparation_conflict("more than one margin call for the bundle")
+        call, user = calls[0], self.parties[role]
+        rights = [c.arg for c in found[RIGHT] if c.arg["bundle"]["bundleId"] == bundle_id]
+        reasons = []
+        if not rights:
+            reasons.append("PRECONDITION_NOT_MET")  # the loan has not reached Z
+        if any(a["status"] == "LOCKED" for a in rights):
+            reasons.append("RIGHT_UNAVAILABLE")  # already allocated
+        if call["status"] != "OPEN" or call["provider"] != user:
+            reasons.append("PRECONDITION_NOT_MET")
+        if not (call["wholeBundleAccepted"] and call["eligibilityPassed"]):
+            reasons.append("COLLATERAL_NOT_ELIGIBLE")
+        held = [a for a in rights if a["holder"] == user]
+        available = [a for a in held if a["status"] == "AVAILABLE"]
+        if len(available) > 1:
+            raise preparation_conflict(f"{role} holds more than one available right")
+        if not held:
+            reasons.append("PRECONDITION_NOT_MET")
+        elif not available:
+            reasons.append("RIGHT_UNAVAILABLE")
+        else:
+            right = available[0]
+            if not any(
+                c.arg["contractType"] == "LOAN"
+                and c.arg["tradeId"] == right.get("sourceRecordId")
+                and int(c.arg["versionAfter"]) == int(right["createdVersion"])
+                for c in found[TRADE]
+            ):
+                reasons.append("PRECONDITION_NOT_MET")
+            if "ALLOCATE_MARGIN" not in right["allowedCommands"]:
+                reasons.append("USE_NOT_PERMITTED")
+        return reasons, available
 
     async def get_snapshot(self, request: web.Request) -> web.Response:
         run_id = self.identify(request)

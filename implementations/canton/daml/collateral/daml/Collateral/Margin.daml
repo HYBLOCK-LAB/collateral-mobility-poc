@@ -1,0 +1,91 @@
+-- The CCP margin call of a run and the allocation that satisfies it
+-- (README §3, business §6.3). The provider (BANK_C) and the CCP both sign a
+-- margin call when the run is prepared, so the provider later allocates
+-- alone: the CCP's authority comes from its signature on the margin call.
+--
+-- Allocating locks the provider's right to the bundle in place: the right
+-- keeps its ID and holder and becomes LOCKED with no allowed command. The
+-- loan, its obligations and the bundle's securities stay as they are; the
+-- CCP is not made the holder.
+module Collateral.Margin where
+
+import Collateral.Right
+import Collateral.Types
+
+-- What an allocation created, in creation order.
+data Allocated = Allocated
+  with
+    lockedRight : ContractId UseRight
+    allocation : ContractId Allocation
+    marginCall : ContractId MarginCall
+  deriving (Eq, Show)
+
+template MarginCall
+  with
+    runId : Text
+    marginCallId : Text
+    bundleId : Text
+    provider : Party
+    ccp : Party
+    wholeBundleAccepted : Bool
+    eligibilityPassed : Bool
+    status : MarginCallStatus
+  where
+    signatory provider, ccp
+    ensure provider /= ccp
+
+    -- ALLOCATE_MARGIN on Z by BANK_C (interface §5.2). Consuming: the margin
+    -- call is replaced by its SATISFIED form, so a second allocation under it
+    -- fails. The checks follow the order the adapter judges in (README §3).
+    choice AllocateMargin : Allocated
+      with
+        requestId : Text
+        allocationId : Text
+        expectedVersion : Int
+        rightCid : ContractId UseRight
+      controller provider
+      do
+        assertMsg "the margin call is not open" (status == OPEN)
+        assertMsg "the bundle is not eligible as margin"
+          (wholeBundleAccepted && eligibilityPassed)
+        right <- fetch rightCid
+        assertMsg "the right belongs to another run or bundle"
+          (right.runId == runId && right.bundle.bundleId == bundleId)
+        assertMsg "the right is held by another party" (right.holder == provider)
+        -- The right a margin allocation uses comes from the loan, cosigned by
+        -- the lender; a right the CCP cosigned did not.
+        assertMsg "the right is cosigned by the CCP" (right.cosigner /= ccp)
+        assertMsg "the right is not available" (right.status == AVAILABLE)
+        assertMsg "the bundle version is not the expected one"
+          (right.createdVersion == expectedVersion)
+        assertMsg "the right does not permit this command"
+          (ALLOCATE_MARGIN `elem` right.allowedCommands)
+        locked <- exercise rightCid Lock with locker = ccp
+        allocation <- create Allocation with
+          runId; allocationId; marginCallId; bundleId; provider; ccp
+          rightId = right.rightId; requestId; actor = provider
+          versionBefore = expectedVersion; versionAfter = expectedVersion + 1
+        satisfied <- create this with status = SATISFIED
+        pure Allocated with lockedRight = locked; allocation; marginCall = satisfied
+
+-- An allocation of the whole bundle to a margin call. An active allocation
+-- is LOCKED (common.schema allocation.status); the PoC has no release.
+template Allocation
+  with
+    runId : Text
+    allocationId : Text
+    marginCallId : Text
+    bundleId : Text
+    provider : Party
+    ccp : Party
+    -- The locked right, for the history and the result query.
+    rightId : Text
+    -- The request that allocated, for the result query (interface §6) after
+    -- the adapter has restarted.
+    requestId : Text
+    actor : Party
+    versionBefore : Int
+    versionAfter : Int
+  where
+    signatory provider, ccp
+    ensure provider /= ccp && versionAfter == versionBefore + 1

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Platform adapters of B1: X (P_X) and Y (P_Y) on 127.0.0.1; the ports are set
-# in adapter/server.py (PLATFORMS).
+# Platform adapters of B1: X (P_X), Y (P_Y) and Z (P_Z) on 127.0.0.1; the
+# ports are set in adapter/server.py (PLATFORMS).
 #
 #   adapter.sh setup     create .venv (Python 3.12) and install adapter/requirements.txt
 #   adapter.sh tokens    generate the four local bearer tokens once (secrets/tokens.env)
-#   adapter.sh start     build the DAR if stale, start X and Y, wait for their warm-up
-#   adapter.sh stop      stop both adapters (SIGTERM, then wait)
-#   adapter.sh status    process and readiness state of X and Y
+#   adapter.sh start     build the DAR if stale, start X, Y and Z, wait for their warm-up
+#   adapter.sh stop      stop the adapters (SIGTERM, then wait)
+#   adapter.sh status    process and readiness state of X, Y and Z
 #
 # Requires a bootstrapped Canton (scripts/canton.sh start). Adapter output goes
 # to $CANTON_STATE_DIR/logs/adapter-<P>.out, events to $CANTON_EVIDENCE_DIR.
@@ -16,10 +16,10 @@ set -euo pipefail
 PY="$CANTON_IMPL_DIR/.venv/bin/python"
 SERVER="$CANTON_IMPL_DIR/adapter/server.py"
 PKG="$CANTON_IMPL_DIR/daml/collateral"
-DAR="$PKG/.daml/dist/collateral-0.3.0.dar"
+DAR="$PKG/.daml/dist/collateral-0.4.0.dar"
 TOKENS="$CANTON_STATE_DIR/secrets/tokens.env"
 LOGDIR="$CANTON_STATE_DIR/logs"
-PLATFORMS="X Y"
+PLATFORMS="X Y Z"
 START_TIMEOUT="${CANTON_ADAPTER_START_TIMEOUT:-120}"
 
 die() { echo "adapter.sh: $*" >&2; exit 1; }
