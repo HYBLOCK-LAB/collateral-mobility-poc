@@ -32,8 +32,10 @@ Participant calls (README §3 "Participant 호출 기록", measurement.md §8.3)
 call a command makes to the participant (the submission, the state reads that
 decide and recheck it, the reads for LOCAL_APPLIED) is logged as a
 MESSAGE_SENT request and a MESSAGE_RECEIVED response under the command's
-run, test and request fields. Calls made to answer the common runner (result
-query, readiness, snapshot) and at start-up are not logged.
+run, test and request fields. The state reads that answer a result query, a
+readiness query or a snapshot are logged the same way under that GET's
+X-Test-ID/X-Attempt-ID and query fields, with no command events; a GET without
+X-Test-ID logs none. Calls made at start-up are not logged.
 
     .venv/bin/python -I adapter/server.py --platform X
 
@@ -108,14 +110,22 @@ SUBMIT_PATH = "/v2/commands/submit-and-wait-for-transaction"
 # the purpose that starts their message IDs: the submission (and its
 # resubmissions), the state read that decides a command, the reads again while
 # no right of the bundle is visible, the reads that explain an unconfirmed
-# submission, and the reads that look for the new right for LOCAL_APPLIED.
+# submission, the reads that look for the new right for LOCAL_APPLIED, and the
+# state reads that answer the common runner's result, readiness and snapshot
+# GETs. The categories of local-check and of the GET reads are this
+# implementation's, not an approved common rule.
 MESSAGE_PURPOSES = {
     "submit": "BUSINESS_INTEGRATION",
     "state": "BUSINESS_INTEGRATION",
     "poll": "BUSINESS_INTEGRATION",
     "recheck": "BUSINESS_INTEGRATION",
     "local-check": "OPERATIONAL",
+    "result": "HARNESS",
+    "readiness": "HARNESS",
+    "snapshot": "HARNESS",
 }
+# The GET reads: no command is received or finished for them.
+QUERY_PURPOSES = ("result", "readiness", "snapshot")
 # interface §6.2: the response wait is one experiment condition for every
 # model. 4 s keeps the answer inside the common runner's 5 s HTTP timeout.
 RESPONSE_WAIT_ENV = "CANTON_RESPONSE_WAIT"
@@ -309,8 +319,9 @@ class LedgerNotReached(LedgerUnreachable):
 
 
 class Trail(NamedTuple):
-    """The command a participant call is made for, and why: the run event
-    fields its messages carry and the purpose of the call (MESSAGE_PURPOSES)."""
+    """The command or runner query a participant call is made for, and why: the
+    run event fields its messages carry and the purpose of the call
+    (MESSAGE_PURPOSES)."""
 
     run_id: str
     test_id: str
@@ -647,9 +658,10 @@ class Adapter:
 
     def log_message(self, event_type: str, message: Message) -> None:
         """MESSAGE_SENT of a participant call's request or MESSAGE_RECEIVED of
-        its response, under the command's run event fields. A call made for no
-        attributable command logs nothing. A log failure does not fail the call:
-        the participant may already have acted on it."""
+        its response, under the run event fields of its command or query. A
+        call made for no attributable command, or for a GET without X-Test-ID,
+        logs nothing. A log failure does not fail the call: the participant may
+        already have acted on it."""
         trail = message.trail
         if not trail.test_id:
             return
@@ -898,6 +910,19 @@ class Adapter:
             test_id if valid_id(test_id) else "NO-TEST-ID",
             attempt if valid_id(attempt) else "attempt-adapter-" + uuid.uuid4().hex,
         )
+
+    def query_trail(
+        self, request: web.Request, run_id: str, purpose: str, **fields
+    ) -> Trail:
+        """The trail of the state reads a runner GET makes (README §3): the
+        GET's X-Test-ID and X-Attempt-ID and the fields its query names. A GET
+        without X-Test-ID logs nothing: the runner's initial-state snapshot
+        sends none, and a run's events may carry only its case's test ID or
+        PREPARE (tests/conformance/runner.py collect_history)."""
+        if "X-Test-ID" not in request.headers:
+            return Trail(run_id, "", {}, purpose)
+        test_id, attempt = self.correlation(request)
+        return Trail(run_id, test_id, {"attempt_id": attempt, **fields}, purpose)
 
     def check_command(self, role: str, command: dict) -> None:
         error = next(self.command_schema.iter_errors(command), None)
@@ -1983,6 +2008,9 @@ class Adapter:
                 f"the credential has no requests on platform {self.platform}",
             )
         key = (run_id, role, request_id)
+        trail = self.query_trail(
+            request, run_id, "result", request_id=request_id, actor=role
+        )
         # Read only: the record kept for the key, else the task still deciding it.
         # A task that ends while it is read has written its record by then:
         # read once more.
@@ -1992,7 +2020,7 @@ class Adapter:
             rejection = self.rejections_of(run_id).get((role, request_id))
             if rejection is not None:
                 return web.json_response(self.rejected_of(rejection, replayed=False))
-            found = await self.prepared_run(run_id)
+            found = await self.prepared_run(run_id, trail)
             record = self.record_of(found, role, request_id)
             if record is not None:
                 return web.json_response(self.result_of(run_id, record, replayed=False))
@@ -2035,8 +2063,16 @@ class Adapter:
         if self.commands[kind] != role:
             raise Refusal("FORBIDDEN", f"the credential may not query {kind} readiness")
         # Read only (interface §7): nothing is reserved, consumed or confirmed.
-        found = await self.prepared_run(run_id)
         bundle_id = query["bundle_id"]
+        trail = self.query_trail(
+            request,
+            run_id,
+            "readiness",
+            bundle_id=bundle_id,
+            command_type=kind,
+            actor=role,
+        )
+        found = await self.prepared_run(run_id, trail)
         reference = query[self.spec["readiness"]]
         if kind == "ALLOCATE_MARGIN":
             reasons, available = self.margin_readiness(found, bundle_id, reference, role)
@@ -2170,7 +2206,9 @@ class Adapter:
             raise Refusal(
                 "FORBIDDEN", "only the experiment observer may read the snapshot"
             )
-        found = await self.prepared_run(run_id)
+        found = await self.prepared_run(
+            run_id, self.query_trail(request, run_id, "snapshot")
+        )
         return web.json_response(self.snapshot_of(run_id, found))
 
     @web.middleware

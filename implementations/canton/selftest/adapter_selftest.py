@@ -13,10 +13,13 @@ What it checks, over HTTP only:
              COMMAND_RECEIVED/FINISHED pair per attributable POST carrying the
              sent X-Test-ID/X-Attempt-ID, nothing for unauthenticated or observer
              calls, strictly increasing sequence per producer
-  messages   the participant calls of those POSTs (message_log_check.py): only
-             the state read that finds the run unprepared, logged as
-             MESSAGE_SENT/RECEIVED under the POST's fields, both present for
-             every POST answered NOT_FOUND and each call answered
+  messages   the participant calls of those POSTs and of the authorised GETs
+             (message_log_check.py): only the state read that finds the run
+             unprepared, logged as MESSAGE_SENT/RECEIVED under the POST's fields
+             for every POST answered NOT_FOUND, and under the GET's X-Test-ID,
+             X-Attempt-ID and query fields (result, readiness, snapshot) for
+             every GET answered NOT_FOUND after that read; each call answered;
+             no message for a refused call or for a GET without X-Test-ID
   burst      concurrent POSTs to X and Y appending to the same events.jsonl
 
 Responses are judged with tests/conformance/checks.py (validate, check_result),
@@ -34,6 +37,7 @@ import secrets
 import sys
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +60,23 @@ ACTOR = {"bank-a": "BANK_A", "bank-b": "BANK_B", "bank-c": "BANK_C"}
 ERROR_KEYS = {"run_id", "request_id", "error"}
 BURST = 16
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def not_one_read(messages: list[dict]) -> str | None:
+    """None when the messages of one GET are a single read, of as many ACS pages
+    as the participant holds, with each page's request and response once (the
+    page numbers themselves are checked by message_log_check); else what they are.
+    """
+    halves = defaultdict(list)  # <purpose>:<hex>:p<n> -> event types
+    for e in messages:
+        halves[e["message_id"].rsplit(":", 1)[0]].append(e["event_type"])
+    reads = {stem.split(":p", 1)[0] for stem in halves}
+    if len(reads) == 1 and all(
+        sorted(kinds) == ["MESSAGE_RECEIVED", "MESSAGE_SENT"]
+        for kinds in halves.values()
+    ):
+        return None
+    return f"{len(reads)} reads, messages {dict(halves)}"
 
 
 class Reply:
@@ -90,6 +111,7 @@ class Selftest:
         self.loan = read_json(ROOT / "shared/fixtures/commands/loan.json")
         self.results: list[dict] = []
         self.expected_events: list[dict] = []  # one entry per attributable POST
+        self.expected_reads: list[dict] = []  # one entry per GET that reads the ledger
         self.counter = 0
 
     # --- HTTP ------------------------------------------------------------
@@ -108,8 +130,10 @@ class Selftest:
         test_id=None,
         attempt=True,
         run_id=None,
+        send_test_id=True,
     ) -> tuple[Reply, dict]:
-        """One request; returns the reply and the correlation headers that were sent."""
+        """One request; returns the reply and the correlation headers that were
+        sent (test_id None when X-Test-ID was left out)."""
         self.counter += 1
         url = self.base[platform] + f"/runs/{run_id or self.run_id}" + path
         if params is not None:
@@ -126,12 +150,15 @@ class Selftest:
         if data is not None:
             request.add_header("Content-Type", "application/json")
         sent = {
-            "test_id": test_id or f"SELFTEST-{self.counter:03}",
+            "test_id": (test_id or f"SELFTEST-{self.counter:03}")
+            if send_test_id
+            else None,
             "attempt_id": f"attempt-selftest-{secrets.token_hex(8)}"
             if attempt
             else None,
         }
-        request.add_header("X-Test-ID", sent["test_id"])
+        if sent["test_id"]:
+            request.add_header("X-Test-ID", sent["test_id"])
         if sent["attempt_id"]:
             request.add_header("X-Attempt-ID", sent["attempt_id"])
         try:
@@ -173,6 +200,7 @@ class Selftest:
         command=None,
         echo=None,
         events=None,
+        reads=None,
         **kwargs,
     ) -> Reply:
         """A pre-acceptance or query error answered with the common error object.
@@ -180,6 +208,7 @@ class Selftest:
         echo: (run_id, request_id) the body must carry; check_result is used when
         a command was sent, as the runner does for every POST response.
         events: the actor whose COMMAND_RECEIVED/FINISHED pair this POST must leave.
+        reads: the purpose and fields of the state read this GET must leave.
         """
         reply, sent = self.call(method, platform, path, role, command=command, **kwargs)
         problems = []
@@ -205,6 +234,10 @@ class Selftest:
             )
         if status == 401 and reply.headers.get("WWW-Authenticate") != "Bearer":
             problems.append("401 without WWW-Authenticate: Bearer")
+        if reads is not None:
+            self.expected_reads.append(
+                {"check": name, "platform": platform, **reads, **sent}
+            )
         if events and command is not None:
             self.expected_events.append(
                 {
@@ -386,6 +419,11 @@ class Selftest:
                 code="NOT_FOUND",
                 schema="result.schema.json",
                 echo=(self.run_id, cmd["request_id"]),
+                reads={
+                    "purpose": "result",
+                    "request_id": cmd["request_id"],
+                    "actor": ACTOR[role],
+                },
             )
             self.refusal(
                 f"unknown-run-snapshot-{p}",
@@ -397,6 +435,20 @@ class Selftest:
                 code="NOT_FOUND",
                 schema="snapshot.schema.json",
                 echo=(self.run_id, None),
+                reads={"purpose": "snapshot"},
+            )
+            # The runner's initial-state snapshot sends no X-Test-ID: no messages.
+            self.refusal(
+                f"unknown-run-snapshot-no-test-id-{p}",
+                "GET",
+                p,
+                "/snapshot",
+                "observer",
+                status=404,
+                code="NOT_FOUND",
+                schema="snapshot.schema.json",
+                echo=(self.run_id, None),
+                send_test_id=False,
             )
         params = {
             "command_type": "CONFIRM_LOAN",
@@ -414,6 +466,12 @@ class Selftest:
             code="NOT_FOUND",
             schema="readiness.schema.json",
             echo=(self.run_id, None),
+            reads={
+                "purpose": "readiness",
+                "bundle_id": params["bundle_id"],
+                "command_type": params["command_type"],
+                "actor": "BANK_B",
+            },
         )
         self.refusal(
             "readiness-forbidden-Y",
@@ -642,7 +700,8 @@ class Selftest:
             f"{stem}: no response logged" for stem in checked.unanswered
         ]
         for (_, purpose, _), _ in checked.counts.items():
-            if purpose != "state":  # an unprepared run is refused after one read
+            # an unprepared run is refused after one read
+            if purpose not in ("state", "result", "readiness", "snapshot"):
                 problems.append(f"{purpose} messages for an unprepared run")
         # Each POST answered NOT_FOUND was refused after the state read that
         # found the run unprepared; concurrent POSTs of one key may share it.
@@ -662,8 +721,37 @@ class Selftest:
             f"{p} {request_id}: no state {kind} logged"
             for p, request_id, kind in sorted(missing)
         ]
+        # Each GET answered NOT_FOUND after its read left that read, with the
+        # GET's test, attempt and query fields and nothing of a command.
+        messages = defaultdict(list)
+        for e in events:
+            if e["event_type"] in ("MESSAGE_SENT", "MESSAGE_RECEIVED"):
+                messages[e["attempt_id"]].append(e)
+        for want in self.expected_reads:
+            got = messages.pop(want["attempt_id"], [])
+            wrong = not_one_read(got)
+            if wrong:
+                problems.append(f"{want['check']}: {wrong}")
+            for e in got:
+                if not e["message_id"].startswith(want["purpose"] + ":"):
+                    problems.append(f"{want['check']}: message {e['message_id']}")
+                if e["platform"] != want["platform"] or e["test_id"] != want["test_id"]:
+                    problems.append(f"{want['check']}: platform or test_id")
+                for key in ("request_id", "bundle_id", "command_type", "actor"):
+                    if e.get(key) != want.get(key):
+                        problems.append(
+                            f"{want['check']}: {e['event_type']} {key}={e.get(key)!r}"
+                        )
+        posted = {want["attempt_id"] for want in self.expected_events}
+        stray = [a for a in messages if a not in posted]
+        # A POST without X-Attempt-ID logs under the attempt the adapter made.
+        generated = sum(a.startswith("attempt-adapter-") for a in stray)
+        allowed = sum(want["attempt_id"] is None for want in self.expected_events)
+        extra = len(stray) - generated + max(generated - allowed, 0)
+        if extra:  # a refused call, or a GET without X-Test-ID
+            problems.append(f"messages for {extra} calls that should leave none")
         self.record(
-            "participant-messages",
+            f"participant-messages ({len(self.expected_reads)} GETs that read)",
             problems,
             detail=f"{sum(checked.counts.values())} logged",
         )
