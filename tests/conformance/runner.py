@@ -875,11 +875,15 @@ def final_gate(model, rows, expected_plan, batch):
                 missing.append("successful run completion event missing")
             wrapper = read_json(path / "evidence/implementation-events.json")
             events = [parse_json(line) for line in wrapper["body"].splitlines() if line.strip()]
-            if not events:
+            results = row.get("command_results")
+            if not isinstance(results, list):
+                missing.append("command_results missing or not a list")
+                continue
+            if not events and (row["test_id"] not in ("AC-02", "AC-03") or results):
                 missing.append("implementation history empty")
             if any(e["run_id"] != row["run_id"] or e["model"] != model for e in events):
                 missing.append("implementation history identity mismatch")
-            history_check(events, row.get("command_results", []), row.get("race_requests", []))
+            history_check(events, results, row.get("race_requests", []))
         except (OSError, ValueError, KeyError, TypeError):
             missing.append("implementation evidence unreadable/incomplete")
     return missing

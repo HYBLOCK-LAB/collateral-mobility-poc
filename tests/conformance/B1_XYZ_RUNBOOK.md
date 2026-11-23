@@ -1,6 +1,6 @@
 # B1 0.4.0 공통 XYZ 연결
 
-작성: 2026-11-23. 현재 연결 대상은 Draft PR #9 `3f56a7bc0e58cc2507bd0f2cb17428d9b2551bba`와
+작성: 2026-11-23. 현재 연결 대상은 Draft PR #9 `4b827d661551ef63033b76da401b273135aa2bdf`와
 총괄의 XYZ 적재 연결이다. 초기 작성 시 실제 공통 XYZ는 NOT_RUN이었으며,
 이후 양하님의 실제 71 PASS와 총괄 원본 대조 결과는
 [B1 XYZ 증거 검토](baselines/model-b1-xyz-review-20261123.md)를 따른다. 최종 인계는 미완료다.
@@ -36,7 +36,7 @@ cd "$B1_Z_RUN_ROOT/repo"
 git fetch origin feat/b1-z-integration
 B1_Z_CONNECTION_COMMIT="$(git rev-parse FETCH_HEAD)"
 printf 'B1 Z connection commit: %s\n' "$B1_Z_CONNECTION_COMMIT"
-git switch --detach 3f56a7bc0e58cc2507bd0f2cb17428d9b2551bba
+git switch --detach 4b827d661551ef63033b76da401b273135aa2bdf
 git restore --source="$B1_Z_CONNECTION_COMMIT" --worktree -- \
   implementations/canton/prepare.py \
   tests/conformance/test_canton_connection.py \
@@ -127,7 +127,18 @@ PR #9 `b182550` 원본의 Participant 업무 호출 기록은 총괄 감사에�
 이 연결 버전은 준비 snapshot에 `X-Test-ID=PREPARE` 및 고유 `X-Attempt-ID`를 보낸다.
 `evidence/snapshot-<P>.json`에는 `test_id`, `attempt_id`, `method=GET`,
 `platform=<P>`, `suffix=snapshot`과 기존 응답·시각 정보를 보존한다. 자체 메시지 검사기도 이 파일을
-호출 대조 대상으로 포함해야 한다(현재 구현 검사기는 `call-*.json`만 읽음).
+호출 대조 대상으로 포함한다(`4b827d6`에서 반영). 이전 검사기는 `call-*.json`만 읽었다.
 보고서의 내부 HARNESS 호출은 `HARNESS/IMPLEMENTATION/REQUEST`·`RESPONSE`로 표시해
 외부 실행기 호출과 구분한다. 공통 분류 정책을 새로 승인한 것은 아니다.
 최종 실행 전 이 보완과 PR #10 공통 검사기 수정의 실제 소스 조합을 고정해야 한다.
+
+`4b827d6` 후속 원본 감사: GET 기록이 있는 기존 준비·4건 ZIP의 136개 파일 해시 및
+최신 검사기 재검사가 통과했다. `0b1ee43` 연결의 새 준비·4 PASS와 추적 snapshot
+대조는 보고된 결과이며, 최종 조합에서 전체 검증과 실제 PREPARE 기록을 확인한다.
+자세한 범위와 미완료 증빙은 위 B1 XYZ 증거 검토의 마지막 절을 따른다.
+
+## 5. 최종 실행 준비
+
+자체 검사기 연결 이후의 최종 소스·환경 증빙 고정과 전체 `--final` 명령은
+[B1 최종 검증 절차](B1_FINAL_RUNBOOK.md)를 따른다. 해당 도구·공통 판정 보완이
+포함된 실제 연결 커밋을 게시한 뒤 적용한다. 기존 10파일 적용만으로 대체하지 않는다.
