@@ -68,7 +68,8 @@ def write_json(path, value, secrets):
 async def snapshot_get(client, url, token):
     # httpx's phase timeouts alone do not bound a slowly streaming response.
     async with asyncio.timeout(HTTP_SECONDS):
-        return await client.get(url, headers={"Authorization": "Bearer " + token})
+        return await client.get(url, headers={"Authorization": "Bearer " + token,
+                                             "X-Test-ID": "PREPARE", "X-Attempt-ID": uuid.uuid4().hex})
 
 
 async def collect_snapshots(config, platforms, run_id, token, batch, secrets):
@@ -81,7 +82,10 @@ async def collect_snapshots(config, platforms, run_id, token, batch, secrets):
             write_json(batch / "evidence" / f"snapshot-{name}.json", {
                 "status_code": response.status_code, "body": response.text,
                 "received_mono_ns": str(time.monotonic_ns()),
-                "clock_id": "observer-" + run_id}, secrets)
+                "clock_id": "observer-" + run_id,
+                "method": "GET", "platform": name, "suffix": "snapshot",
+                "test_id": response.request.headers["X-Test-ID"],
+                "attempt_id": response.request.headers["X-Attempt-ID"]}, secrets)
             if response.status_code != 200:
                 raise RuntimeError(f"snapshot {name}: HTTP {response.status_code}")
             snapshots[name] = parse_json(response.text)

@@ -44,6 +44,7 @@ class HarnessTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name)
         self.requests = []
+        self.snapshot_contexts = []
         self.mutate = lambda body: None
         self.http_status = 200
         test = self
@@ -51,6 +52,7 @@ class HarnessTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 test.requests.append((self.path, self.headers.get("Authorization")))
+                test.snapshot_contexts.append((self.headers.get("X-Test-ID"), self.headers.get("X-Attempt-ID")))
                 # Platform is supplied through a base URL path in each test config.
                 body = snapshot(self.path.split("/")[3], self.path.split("/")[1])
                 test.mutate(body)
@@ -117,6 +119,13 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(len(self.requests), 3)
         self.assertTrue(all(token == "Bearer test-private-observer-credential"
                             for _, token in self.requests))
+        self.assertTrue(all(test_id == "PREPARE" for test_id, _ in self.snapshot_contexts))
+        self.assertEqual(len({attempt for _, attempt in self.snapshot_contexts}), 3)
+        for platform, (test_id, attempt) in zip("XYZ", self.snapshot_contexts):
+            saved = read_json(batch / f"evidence/snapshot-{platform}.json")
+            self.assertEqual((saved["test_id"], saved["attempt_id"]), (test_id, attempt))
+            self.assertEqual((saved["method"], saved["platform"], saved["suffix"]), ("GET", platform, "snapshot"))
+            self.assertRegex(attempt, r"^[0-9a-f]{32}$")
         validate(json.loads((batch / "events.jsonl").read_text()), "event.schema.json")
         manifest = read_json(batch / "manifest.json")
         self.assertEqual(manifest["fixture"]["sha256"], runner.digest(self.fixture_path))
