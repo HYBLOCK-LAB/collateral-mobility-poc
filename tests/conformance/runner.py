@@ -92,6 +92,22 @@ async def collect_snapshots(config, platforms, run_id, token, batch, secrets):
     return snapshots
 
 
+def check_helper_stage(command, platforms):
+    """Check the documented argv of coordinator loaders/collectors, including docker exec."""
+    helpers = {("db-api", "prepare.py"), ("db-api", "collect_events.py"), ("canton", "prepare.py")}
+    for index, argument in enumerate(command or []):
+        parts = Path(argument).parts
+        if len(parts) < 3 or parts[-3] != "implementations" or tuple(parts[-2:]) not in helpers:
+            continue
+        options = command[index + 1:]
+        if options not in ([], ["xy"], ["xyz"]):
+            raise CheckError("coordinator helper argv must end with optional xy/xyz stage")
+        selected = options[0] if options else "xy"
+        expected = "".join(sorted(set(platforms))).lower()
+        if selected != expected:
+            raise CheckError(f"coordinator helper stage {selected} differs from requested {expected}")
+
+
 def run(args, *, batch=None, run_id=None, quiet=False):
     # mkdir is exclusive; a collision never changes an earlier batch or run.
     run_id = run_id or "run-" + uuid.uuid4().hex
@@ -129,6 +145,8 @@ def run(args, *, batch=None, run_id=None, quiet=False):
         manifest["fixture"] = {"path": str(fixture_path), "sha256": digest(fixture_path)}
         config = read_json(config_path)
         validate_config(config)
+        check_helper_stage(config["prepare_command"], args.platforms)
+        check_helper_stage(getattr(args, "collect_command", None), args.platforms)
         secrets = secret_values(config)
         # Credentials belong in environment variables, including for prepare_command.
         if any(secret in json.dumps(config) for secret in secrets):
@@ -747,11 +765,12 @@ def export_implementation_events(command, execution):
     """Optional local collector; business processing has already finished."""
     if not command:
         return
+    check_helper_stage(command, getattr(execution, "platforms", []))
     output = (ROOT / execution.config["evidence_dir"] / execution.run_id / "events.jsonl").resolve()
     auth_names = set(execution.config.get("auth_env", {}).values())
     # The collector needs read-only DB credentials, never seed DSNs or API tokens.
     environment = {k: v for k, v in os.environ.items()
-                   if k in ("MODEL_A_X_EVIDENCE_DSN", "MODEL_A_Y_EVIDENCE_DSN")
+                   if k in ("MODEL_A_X_EVIDENCE_DSN", "MODEL_A_Y_EVIDENCE_DSN", "MODEL_A_Z_EVIDENCE_DSN")
                    or (k not in auth_names and not any(s in k.upper() for s in CREDENTIAL_MARKERS))}
     try:
         completed = subprocess.run(

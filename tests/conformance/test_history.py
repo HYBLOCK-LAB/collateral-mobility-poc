@@ -30,6 +30,13 @@ def history_fixture():
 
 
 class HistoryTests(unittest.TestCase):
+    def test_malformed_command_result_pairs_are_evidence_errors(self):
+        command, result, _ = history_fixture()
+        for commands in (None, [None], [[command]], [[command, result, result]],
+                         [[command, None]], [[None, result]], [[command, {}]], [[{}, result]]):
+            with self.subTest(commands=commands), self.assertRaises(CheckError):
+                history_check([], commands)
+
     def test_valid_transition_and_missing_internal_evidence(self):
         command, result, rows = history_fixture()
         history_check(rows, [(command, result)])

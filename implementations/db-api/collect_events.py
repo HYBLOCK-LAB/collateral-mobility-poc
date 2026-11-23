@@ -16,11 +16,11 @@ class Unsettled(CheckError):
     pass
 
 
-def collect_once(run_id, output):
+def collect_once(run_id, output, stage="xy"):
     valid_run(run_id)
     events = []
     unsettled = False
-    for platform in ("X", "Y"):
+    for platform in {"xy": ("X", "Y"), "xyz": ("X", "Y", "Z")}[stage]:
         with connect(platform, "EVIDENCE") as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             if not connection.execute("SELECT 1 FROM runs WHERE run_id = %s", (run_id,)).fetchone():
@@ -61,12 +61,12 @@ def collect_once(run_id, output):
     return len(events)
 
 
-def collect(run_id, output):
+def collect(run_id, output, stage="xy"):
     # Recovery may publish its commit observation after the result becomes visible.
     deadline = time.monotonic() + 10
     while True:
         try:
-            return collect_once(run_id, output)
+            return collect_once(run_id, output, stage)
         except Unsettled:
             if time.monotonic() >= deadline:
                 raise
@@ -75,11 +75,12 @@ def collect(run_id, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("stage", nargs="?", choices=("xy", "xyz"), default="xy")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        count = collect(args.run_id, args.output)
+        count = collect(args.run_id, args.output, args.stage)
     except Exception as error:
         reason = str(error) if isinstance(error, CheckError) else type(error).__name__
         print(json.dumps({"status": "FAILED", "reason": reason}))

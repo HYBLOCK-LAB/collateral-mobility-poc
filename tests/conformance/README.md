@@ -569,3 +569,6 @@ PR #5 `1d369e1c6931d255c1baa4715566cec43074d56d`의 `collateral` 0.3.0을 기준
 ready-Y-0의 실제 빈 이벤트 파일이 생성됐고, 확정 거래의 이벤트는 존재한다. 상위 `acceptance=INCONCLUSIVE`와 `final_handoff_eligible=false`는 X→Y 부분 검증을 XYZ 전체 인수와 구분한 표시다. 전체 완료로 바꾸지 않는다.
 
 [B1 X→Y 기준 검토 기록](baselines/model-b1-xy-20261122.md)에 코드·환경·증거·병합 후 확인·Z/B2 순서를 정리했다. 현재 PR #5·#7은 병합 전이며 기준 확정·Z 착수는 아직 승인하지 않았다. 추가 실행기 로직 수정은 필요하지 않은 것으로 판단했다.
+
+Model A XYZ의 실제 초기 적재, readiness 저장 완료 확인과 최종 수집 명령은
+[Model A XYZ 실행 안내](MODEL_A_XYZ_RUNBOOK.md)를 따른다.

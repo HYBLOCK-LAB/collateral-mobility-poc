@@ -1,0 +1,24 @@
+{
+  "model": "A",
+  "platforms": {
+    "X": "http://127.0.0.1:8101",
+    "Y": "http://127.0.0.1:8102",
+    "Z": "http://127.0.0.1:8103"
+  },
+  "auth_env": {
+    "bank-a": "POC_BANK_A_TOKEN",
+    "bank-b": "POC_BANK_B_TOKEN",
+    "bank-c": "POC_BANK_C_TOKEN",
+    "experiment-observer": "POC_OBSERVER_TOKEN"
+  },
+  "prepare_command": [
+    ".venv/bin/python",
+    "implementations/db-api/readiness_evidence.py",
+    "prepare",
+    "http://127.0.0.1:8103",
+    "/run/secrets/model_a_readiness_evidence",
+    "implementations/db-api/prepare.py",
+    "xyz"
+  ],
+  "evidence_dir": "implementations/db-api/logs"
+}
