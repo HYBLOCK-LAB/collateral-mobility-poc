@@ -1,0 +1,16 @@
+{
+  "model": "B1",
+  "platforms": {
+    "X": "http://127.0.0.1:8201",
+    "Y": "http://127.0.0.1:8202",
+    "Z": "http://127.0.0.1:8203"
+  },
+  "auth_env": {
+    "bank-a": "POC_BANK_A_TOKEN",
+    "bank-b": "POC_BANK_B_TOKEN",
+    "bank-c": "POC_BANK_C_TOKEN",
+    "experiment-observer": "POC_OBSERVER_TOKEN"
+  },
+  "prepare_command": [".venv/bin/python", "implementations/canton/prepare.py", "xyz"],
+  "evidence_dir": "implementations/canton/logs"
+}

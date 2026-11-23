@@ -1,4 +1,4 @@
-"""Coordinator S0 loader for PR #5 collateral 0.3.0; never submits business choices."""
+"""Coordinator S0 loader; XYZ requires PR #9 collateral 0.4.0 and fresh b1-xyz state."""
 
 import argparse
 import hashlib
@@ -16,9 +16,9 @@ sys.path.insert(0, str(ROOT / "tests/conformance"))
 from checks import CheckError, read_json, validate_fixture  # noqa: E402
 
 
-def commands(run_id, fixture, parties):
+def commands(run_id, fixture, parties, stage="xy"):
     validate_fixture(fixture)
-    mapped = {"P_X": [], "P_Y": []}
+    mapped = {p: [] for p in {"xy": ("P_X", "P_Y"), "xyz": ("P_X", "P_Y", "P_Z")}[stage]}
 
     def create(participant, template, argument):
         mapped[participant].append({"CreateCommand": {
@@ -58,6 +58,14 @@ def commands(run_id, fixture, parties):
                     "provided": c["provided"],
                 },
             })
+    if stage == "xyz":
+        for margin in fixture["margin_calls"]:
+            create("P_Z", "Collateral.Margin:MarginCall", {
+                "marginCallId": margin["margin_call_id"], "bundleId": margin["bundle_id"],
+                "provider": parties[margin["provider"]], "ccp": parties[margin["ccp"]],
+                "wholeBundleAccepted": margin["whole_bundle_accepted"],
+                "eligibilityPassed": margin["eligibility_passed"], "status": margin["status"],
+            })
     return mapped
 
 
@@ -89,14 +97,18 @@ def existing_run(client, url, parties, run_id):
         query["pageToken"] = token
 
 
-def prepare(run_id, fixture, state, client):
+def prepare(run_id, fixture, state, client, stage="xy"):
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", run_id) or set(run_id) == {"."}:
         raise CheckError("invalid run_id")
     ids = read_json(state / "ids.json")
+    if stage == "xyz" and ids.get("topology") != "b1-xyz":
+        raise CheckError("XYZ preparation requires fresh b1-xyz state from PR #9")
     parties = ids["parties"]
-    mapped = commands(run_id, fixture, parties)
+    mapped = commands(run_id, fixture, parties, stage)
     hosted = {"P_X": [parties["BANK_A"], parties["BANK_B"]],
               "P_Y": [parties["BANK_B"], parties["BANK_C"]]}
+    if stage == "xyz":
+        hosted["P_Z"] = [parties["BANK_C"], parties["CCP"]]
     urls = {p: ids["json_api"][p].rstrip("/") for p in mapped}
     for p, url in urls.items():
         parsed = urlsplit(url)
@@ -142,13 +154,14 @@ def prepare(run_id, fixture, state, client):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("stage", nargs="?", choices=("xy", "xyz"), default="xy")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--fixture", required=True, type=Path)
     args = parser.parse_args()
     try:
         state = Path(os.environ["CANTON_STATE_DIR"])
         with httpx.Client(timeout=30, trust_env=False) as client:
-            prepare(args.run_id, read_json(args.fixture), state, client)
+            prepare(args.run_id, read_json(args.fixture), state, client, args.stage)
     except Exception as error:
         reason = str(error) if isinstance(error, CheckError) else type(error).__name__
         print(json.dumps({"run_id": args.run_id, "status": "FAILED", "reason": reason}))
