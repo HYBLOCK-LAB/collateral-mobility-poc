@@ -28,6 +28,13 @@ allocation and satisfies the margin call; the Z readiness and the snapshot's
 margin calls and allocations. The ledger must have been bootstrapped with the
 b1-xyz topology (ids.json); the adapter refuses to start on another one.
 
+Participant calls (README §3 "Participant 호출 기록", measurement.md §8.3): every
+call a command makes to the participant (the submission, the state reads that
+decide and recheck it, the reads for LOCAL_APPLIED) is logged as a
+MESSAGE_SENT request and a MESSAGE_RECEIVED response under the command's
+run, test and request fields. Calls made to answer the common runner (result
+query, readiness, snapshot) and at start-up are not logged.
+
     .venv/bin/python -I adapter/server.py --platform X
 
 Environment (scripts/adapter.sh provides it through scripts/env.sh):
@@ -64,6 +71,7 @@ from aiohttp import (
     ClientError,
     ClientSession,
     ClientTimeout,
+    TraceConfig,
     web,
 )
 from jsonschema import Draft202012Validator
@@ -96,6 +104,18 @@ ACS_PAGE_SIZE = 500
 LOCAL_WAIT = 2.0
 LOCAL_POLL = 0.05
 SUBMIT_PATH = "/v2/commands/submit-and-wait-for-transaction"
+# Participant calls logged as messages (README §3 "Participant 호출 기록"), by
+# the purpose that starts their message IDs: the submission (and its
+# resubmissions), the state read that decides a command, the reads again while
+# no right of the bundle is visible, the reads that explain an unconfirmed
+# submission, and the reads that look for the new right for LOCAL_APPLIED.
+MESSAGE_PURPOSES = {
+    "submit": "BUSINESS_INTEGRATION",
+    "state": "BUSINESS_INTEGRATION",
+    "poll": "BUSINESS_INTEGRATION",
+    "recheck": "BUSINESS_INTEGRATION",
+    "local-check": "OPERATIONAL",
+}
 # interface §6.2: the response wait is one experiment condition for every
 # model. 4 s keeps the answer inside the common runner's 5 s HTTP timeout.
 RESPONSE_WAIT_ENV = "CANTON_RESPONSE_WAIT"
@@ -286,6 +306,24 @@ class LedgerUnreachable(Exception):
 
 class LedgerNotReached(LedgerUnreachable):
     """No connection to the participant: the request was not sent."""
+
+
+class Trail(NamedTuple):
+    """The command a participant call is made for, and why: the run event
+    fields its messages carry and the purpose of the call (MESSAGE_PURPOSES)."""
+
+    run_id: str
+    test_id: str
+    fields: dict
+    purpose: str
+
+
+class Message(NamedTuple):
+    """One participant call logged as messages: its trail, and the stem of the
+    IDs of its request (<stem>:req) and response (<stem>:res)."""
+
+    trail: Trail
+    stem: str
 
 
 class Active(NamedTuple):
@@ -571,12 +609,23 @@ class Adapter:
 
     # --- ledger -----------------------------------------------------------
 
-    async def ledger(self, method: str, path: str, **kwargs) -> tuple[int, object]:
+    async def ledger(
+        self, method: str, path: str, message: Message | None = None, **kwargs
+    ) -> tuple[int, object]:
+        """One participant call. With a message, its request is logged when the
+        connection is held and the request is handed to it for writing
+        (request_sent: the attempt to send), its response when it has been read
+        whole. A call that got no connection logs nothing; one whose answer was
+        lost, or whose writing failed after that point (the connection closed in
+        between), logs only the request, and is treated as possibly sent
+        (LedgerUnreachable)."""
         try:
             async with self.session.request(
-                method, self.ledger_url + path, **kwargs
+                method, self.ledger_url + path, trace_request_ctx=message, **kwargs
             ) as reply:
                 raw = await reply.read()
+            if message is not None:
+                self.log_message("MESSAGE_RECEIVED", message)
         except ClientConnectorError as error:
             raise LedgerNotReached(f"{method} {path}: {error!r}") from error
         except (ClientError, asyncio.TimeoutError) as error:
@@ -588,6 +637,39 @@ class Adapter:
             body = raw[:500].decode(errors="replace")
         return reply.status, body
 
+    async def request_sent(self, session, context, params) -> None:
+        """aiohttp trace hook (on_request_headers_sent): the participant call's
+        connection is held and its request is about to be written. aiohttp calls
+        it before the headers reach the transport, and no later hook marks the
+        write, so this is the attempt to send."""
+        if context.trace_request_ctx is not None:
+            self.log_message("MESSAGE_SENT", context.trace_request_ctx)
+
+    def log_message(self, event_type: str, message: Message) -> None:
+        """MESSAGE_SENT of a participant call's request or MESSAGE_RECEIVED of
+        its response, under the command's run event fields. A call made for no
+        attributable command logs nothing. A log failure does not fail the call:
+        the participant may already have acted on it."""
+        trail = message.trail
+        if not trail.test_id:
+            return
+        request = event_type == "MESSAGE_SENT"
+        adapter, participant = self.events.producer, self.spec["participant"]
+        try:
+            self.events.write(
+                event_type,
+                trail.run_id,
+                trail.test_id,
+                message_id=f"{message.stem}:{'req' if request else 'res'}",
+                message_kind="REQUEST" if request else "RESPONSE",
+                message_category=MESSAGE_PURPOSES[trail.purpose],
+                source_id=adapter if request else participant,
+                destination_id=participant if request else adapter,
+                **trail.fields,
+            )
+        except Exception:
+            log.exception("%s of %s not logged", event_type, message.stem)
+
     def party_filter(self) -> dict:
         """Every contract a party hosted on this platform's participant sees."""
         return {
@@ -598,13 +680,16 @@ class Adapter:
             "verbose": False,
         }
 
-    async def active_contracts(self, run_id: str) -> dict[str, list[Active]]:
+    async def active_contracts(
+        self, run_id: str, trail: Trail | None = None
+    ) -> dict[str, list[Active]]:
         """The run's active business contracts on this participant, by template.
 
         One snapshot of the active contract set at a single offset: the first
         page fixes the offset (ledger end), and its page token carries it to the
         following pages. A token is only valid with the query that produced it,
-        so the later requests repeat that query and add the token.
+        so the later requests repeat that query and add the token. With a
+        trail, each page is one logged call: <purpose>:<read>:p<page>.
         """
         found: dict[str, list[Active]] = {
             entity: []
@@ -623,9 +708,13 @@ class Adapter:
             "eventFormat": self.party_filter(),
             "maxPageSize": ACS_PAGE_SIZE,
         }
+        read = f"{trail.purpose}:{uuid.uuid4().hex}" if trail is not None else None
+        pages = 0
         while True:
+            pages += 1
+            message = Message(trail, f"{read}:p{pages}") if trail is not None else None
             status, page = await self.ledger(
-                "POST", "/v2/state/active-contracts-page", json=query
+                "POST", "/v2/state/active-contracts-page", message, json=query
             )
             if status != 200 or not isinstance(page, dict):
                 raise LedgerUnreachable(f"active contracts: {status} {page}")
@@ -650,11 +739,13 @@ class Adapter:
                 return found
             query["pageToken"] = token
 
-    async def prepared_run(self, run_id: str) -> dict[str, list[Active]]:
+    async def prepared_run(
+        self, run_id: str, trail: Trail | None = None
+    ) -> dict[str, list[Active]]:
         """The run's active contracts, or the refusal when they cannot be read or
         the run was not prepared on this platform (README §3)."""
         try:
-            found = await self.active_contracts(run_id)
+            found = await self.active_contracts(run_id, trail)
         except LedgerUnreachable as error:
             log.warning(
                 "participant %s not readable: %s", self.spec["participant"], error
@@ -1365,7 +1456,7 @@ class Adapter:
             if rejection["content"] != content:
                 raise self.conflict(request_id)
             return 200, self.rejected_of(rejection, replayed=True)
-        found = await self.prepared_run(run_id)
+        found = await self.prepared_run(run_id, Trail(run_id, test_id, fields, "state"))
         record = self.record_of(found, role, request_id)
         if record is not None:
             if not record_matches(record, command):
@@ -1380,7 +1471,9 @@ class Adapter:
             reads, deadline = 1, time.monotonic() + ABSENT_WAIT
             while verdict.absent and time.monotonic() < deadline:
                 await asyncio.sleep(LOCAL_POLL)
-                found = await self.prepared_run(run_id)
+                found = await self.prepared_run(
+                    run_id, Trail(run_id, test_id, fields, "poll")
+                )
                 reads += 1
                 record = self.record_of(found, role, request_id)
                 if record is not None:
@@ -1463,7 +1556,15 @@ class Adapter:
                 attempts += 1
                 code, firm = None, False
                 try:
-                    status, reply = await self.ledger("POST", SUBMIT_PATH, json=body)
+                    status, reply = await self.ledger(
+                        "POST",
+                        SUBMIT_PATH,
+                        Message(
+                            Trail(run_id, test_id, fields, "submit"),
+                            f"submit:{uuid.uuid4().hex}",
+                        ),
+                        json=body,
+                    )
                 except LedgerUnreachable as error:
                     log.warning(
                         "%s %s %s: no ledger answer: %s",
@@ -1527,7 +1628,12 @@ class Adapter:
                             sent = True
                 others = firm and code not in DEDUPLICATED
                 settled = await self.settle(
-                    key, command, others, replayed, judge=not confirmed
+                    key,
+                    command,
+                    others,
+                    replayed,
+                    Trail(run_id, test_id, fields, "recheck"),
+                    judge=not confirmed,
                 )
                 if settled is not None:
                     return settled
@@ -1567,6 +1673,7 @@ class Adapter:
         command: dict,
         others: bool,
         replayed: bool,
+        trail: Trail,
         judge: bool = True,
     ) -> tuple[int, dict] | None:
         """Explain an unconfirmed submission by the state: this request's trade
@@ -1592,7 +1699,7 @@ class Adapter:
         deadline = time.monotonic() + SETTLE_WAIT
         while True:
             try:
-                found = await self.prepared_run(run_id)
+                found = await self.prepared_run(run_id, trail)
             except Refusal as refusal:
                 log.warning(
                     "%s %s: state not read: %s", run_id, request_id, refusal.message
@@ -1716,7 +1823,9 @@ class Adapter:
                 **self.right_event(locked),
                 **fields,
             )
-            if await self.locally_applied(run_id, locked["contractId"]):
+            if await self.locally_applied(
+                Trail(run_id, test_id, fields, "local-check"), locked["contractId"]
+            ):
                 self.events.write(
                     "LOCAL_APPLIED",
                     run_id,
@@ -1750,7 +1859,9 @@ class Adapter:
                 **self.right_event(successor),
                 **fields,
             )
-            if await self.locally_applied(run_id, successor["contractId"]):
+            if await self.locally_applied(
+                Trail(run_id, test_id, fields, "local-check"), successor["contractId"]
+            ):
                 self.events.write(
                     "LOCAL_APPLIED",
                     run_id,
@@ -1760,14 +1871,14 @@ class Adapter:
                     **fields,
                 )
 
-    async def locally_applied(self, run_id: str, right_cid: str) -> bool:
+    async def locally_applied(self, trail: Trail, right_cid: str) -> bool:
         """Whether this participant's active contracts show the new right
         (measurement.md §4.1 LOCAL_APPLIED). The transaction is committed either
         way, so a failed check only leaves the event out; it is not an error."""
         deadline = time.monotonic() + LOCAL_WAIT
         while True:
             try:
-                found = await self.active_contracts(run_id)
+                found = await self.active_contracts(trail.run_id, trail)
             except LedgerUnreachable as error:
                 log.warning("LOCAL_APPLIED not checked: %s", error)
                 return False
@@ -2082,7 +2193,9 @@ class Adapter:
     # --- lifecycle --------------------------------------------------------
 
     async def serve(self) -> None:
-        self.session = ClientSession(timeout=LEDGER_TIMEOUT)
+        trace = TraceConfig()
+        trace.on_request_headers_sent.append(self.request_sent)
+        self.session = ClientSession(timeout=LEDGER_TIMEOUT, trace_configs=[trace])
         runner = None
         try:
             warmup_ms = await self.prepare_ledger()

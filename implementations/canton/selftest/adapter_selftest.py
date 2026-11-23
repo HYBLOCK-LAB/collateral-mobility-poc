@@ -13,6 +13,10 @@ What it checks, over HTTP only:
              COMMAND_RECEIVED/FINISHED pair per attributable POST carrying the
              sent X-Test-ID/X-Attempt-ID, nothing for unauthenticated or observer
              calls, strictly increasing sequence per producer
+  messages   the participant calls of those POSTs (message_log_check.py): only
+             the state read that finds the run unprepared, logged as
+             MESSAGE_SENT/RECEIVED under the POST's fields, both present for
+             every POST answered NOT_FOUND and each call answered
   burst      concurrent POSTs to X and Y appending to the same events.jsonl
 
 Responses are judged with tests/conformance/checks.py (validate, check_result),
@@ -38,7 +42,9 @@ from urllib.parse import urlencode
 IMPL_DIR = Path(__file__).resolve().parent.parent
 ROOT = IMPL_DIR.parent.parent
 sys.path.insert(0, str(ROOT / "tests/conformance"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checks import CheckError, check_result, parse_json, read_json, validate  # noqa: E402
+from message_log_check import check_run as check_messages  # noqa: E402
 
 TOKEN_ENV = {
     "bank-a": "POC_BANK_A_TOKEN",
@@ -145,10 +151,12 @@ class Selftest:
 
     # --- expectations ----------------------------------------------------
 
-    def record(self, name, problems, reply: Reply | None = None):
+    def record(self, name, problems, reply: Reply | None = None, detail=None):
         entry = {"check": name, "ok": not problems, "problems": problems}
         if reply is not None:
             entry.update(http=reply.status, code=reply.code)
+        if detail is not None:
+            entry["detail"] = detail
         self.results.append(entry)
 
     def refusal(
@@ -629,11 +637,43 @@ class Selftest:
             last[key] = event["sequence"]
         self.record("events-schema-and-sequence", problems)
 
+        checked = check_messages(events)
+        problems = checked.problems + [
+            f"{stem}: no response logged" for stem in checked.unanswered
+        ]
+        for (_, purpose, _), _ in checked.counts.items():
+            if purpose != "state":  # an unprepared run is refused after one read
+                problems.append(f"{purpose} messages for an unprepared run")
+        # Each POST answered NOT_FOUND was refused after the state read that
+        # found the run unprepared; concurrent POSTs of one key may share it.
+        reads = {
+            (e["platform"], e["request_id"], e["event_type"])
+            for e in events
+            if e["event_type"] in ("MESSAGE_SENT", "MESSAGE_RECEIVED")
+            and e["message_id"].startswith("state:")
+        }
+        missing = {
+            (want["platform"], want["request_id"], kind)
+            for want in self.expected_events
+            if want["code"] == "NOT_FOUND"
+            for kind in ("MESSAGE_SENT", "MESSAGE_RECEIVED")
+        } - reads
+        problems += [
+            f"{p} {request_id}: no state {kind} logged"
+            for p, request_id, kind in sorted(missing)
+        ]
+        self.record(
+            "participant-messages",
+            problems,
+            detail=f"{sum(checked.counts.values())} logged",
+        )
+
         problems = []
         by_attempt = {}
         for event in events:
-            by_attempt.setdefault(event["attempt_id"], []).append(event)
-        generated = [a for a in by_attempt if a.startswith("attempt-adapter-")]
+            if event["event_type"] not in ("MESSAGE_SENT", "MESSAGE_RECEIVED"):
+                by_attempt.setdefault(event["attempt_id"], []).append(event)
+        generated = [a for a in by_attempt if a and a.startswith("attempt-adapter-")]
         for want in self.expected_events:
             attempt = want["attempt_id"]
             if attempt is None:  # the adapter generates one when the header is absent
@@ -693,6 +733,7 @@ class Selftest:
         for r in self.results:
             status = "ok  " if r["ok"] else "FAIL"
             http = f"{r.get('http', '')} {r.get('code') or ''}".strip()
+            http = f"{http} {r.get('detail', '')}".strip()
             print(f"{status} {r['check']:<44} {http}")
             for problem in r["problems"]:
                 print(f"       {problem}")
