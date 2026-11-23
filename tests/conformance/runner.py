@@ -88,6 +88,22 @@ async def collect_snapshots(config, platforms, run_id, token, batch, secrets):
     return snapshots
 
 
+def check_helper_stage(command, platforms):
+    """Check the documented argv of coordinator loaders/collectors, including docker exec."""
+    helpers = {("db-api", "prepare.py"), ("db-api", "collect_events.py"), ("canton", "prepare.py")}
+    for index, argument in enumerate(command or []):
+        parts = Path(argument).parts
+        if len(parts) < 3 or parts[-3] != "implementations" or tuple(parts[-2:]) not in helpers:
+            continue
+        options = command[index + 1:]
+        if options not in ([], ["xy"], ["xyz"]):
+            raise CheckError("coordinator helper argv must end with optional xy/xyz stage")
+        selected = options[0] if options else "xy"
+        expected = "".join(sorted(set(platforms))).lower()
+        if selected != expected:
+            raise CheckError(f"coordinator helper stage {selected} differs from requested {expected}")
+
+
 def run(args, *, batch=None, run_id=None, quiet=False):
     # mkdir is exclusive; a collision never changes an earlier batch or run.
     run_id = run_id or "run-" + uuid.uuid4().hex
@@ -125,6 +141,8 @@ def run(args, *, batch=None, run_id=None, quiet=False):
         manifest["fixture"] = {"path": str(fixture_path), "sha256": digest(fixture_path)}
         config = read_json(config_path)
         validate_config(config)
+        check_helper_stage(config["prepare_command"], args.platforms)
+        check_helper_stage(getattr(args, "collect_command", None), args.platforms)
         secrets = secret_values(config)
         # Credentials belong in environment variables, including for prepare_command.
         if any(secret in json.dumps(config) for secret in secrets):
@@ -743,6 +761,7 @@ def export_implementation_events(command, execution):
     """Optional local collector; business processing has already finished."""
     if not command:
         return
+    check_helper_stage(command, getattr(execution, "platforms", []))
     output = (ROOT / execution.config["evidence_dir"] / execution.run_id / "events.jsonl").resolve()
     auth_names = set(execution.config.get("auth_env", {}).values())
     # The collector needs read-only DB credentials, never seed DSNs or API tokens.
@@ -871,11 +890,15 @@ def final_gate(model, rows, expected_plan, batch):
                 missing.append("successful run completion event missing")
             wrapper = read_json(path / "evidence/implementation-events.json")
             events = [parse_json(line) for line in wrapper["body"].splitlines() if line.strip()]
-            if not events and (row["test_id"] not in ("AC-02", "AC-03") or row.get("command_results")):
+            results = row.get("command_results")
+            if not isinstance(results, list):
+                missing.append("command_results missing or not a list")
+                continue
+            if not events and (row["test_id"] not in ("AC-02", "AC-03") or results):
                 missing.append("implementation history empty")
             if any(e["run_id"] != row["run_id"] or e["model"] != model for e in events):
                 missing.append("implementation history identity mismatch")
-            history_check(events, row.get("command_results", []), row.get("race_requests", []))
+            history_check(events, results, row.get("race_requests", []))
         except (OSError, ValueError, KeyError, TypeError):
             missing.append("implementation evidence unreadable/incomplete")
     return missing

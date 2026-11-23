@@ -1,21 +1,63 @@
 """Mapping and collector-hook tests; actual PostgreSQL verification is separate."""
 
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from argparse import Namespace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from checks import ROOT, CheckError, EvidenceMissing, read_json
-from runner import Execution, collect_history, export_implementation_events, secret_values
+from runner import Execution, check_helper_stage, collect_history, export_implementation_events, run, secret_values
 
 
 class CollectorHookTests(unittest.TestCase):
+    def test_matching_helper_stages_support_local_and_docker_argv(self):
+        check_helper_stage([sys.executable, "implementations/db-api/prepare.py"], ["X", "Y"])
+        check_helper_stage([sys.executable, "implementations/db-api/prepare.py", "xy"], ["Y", "X"])
+        for helper in ("implementations/db-api/prepare.py", "implementations/db-api/collect_events.py",
+                       "implementations/canton/prepare.py"):
+            check_helper_stage(["docker", "exec", "worker", "python", str(ROOT / helper), "xyz"],
+                               ["X", "Y", "Z"])
+        # Custom commands have their own interface; do not infer their stage from arbitrary argv.
+        check_helper_stage([sys.executable, "-c", "print('custom loader')"], ["X", "Y", "Z"])
+        with self.assertRaises(CheckError):
+            check_helper_stage([sys.executable, "implementations/db-api/prepare.py", "xyz", "unexpected"],
+                               ["X", "Y", "Z"])
+
+    def test_mismatched_helper_stages_are_blocked_before_any_preparation_subprocess(self):
+        prepare = [sys.executable, "implementations/db-api/prepare.py"]
+        collect = [sys.executable, "implementations/db-api/collect_events.py"]
+        cases = [(["X", "Y"], prepare + ["xyz"], None),
+                 (["X", "Y", "Z"], prepare, None),
+                 (["X", "Y", "Z"], prepare + ["xyz"], collect),
+                 (["X", "Y"], prepare, collect + ["xyz"]),
+                 (["X", "Y"], [sys.executable, "implementations/canton/prepare.py", "xyz"], None)]
+        for platforms, loader, collector in cases:
+            with self.subTest(platforms=platforms, loader=loader, collector=collector), tempfile.TemporaryDirectory() as temp:
+                config = read_json(ROOT / "tests/conformance/config.example.json")
+                config["prepare_command"] = loader
+                config_path = Path(temp) / "config.json"
+                config_path.write_text(json.dumps(config))
+                args = Namespace(config=str(config_path), fixture=str(ROOT / "shared/fixtures/initial/f0-normal.json"),
+                                 platforms=platforms, output=temp, observer_auth="bearer", collect_command=collector)
+                with patch.dict(os.environ, {"POC_OBSERVER_TOKEN": "review-observer-token"}), patch(
+                        "runner.platform.processor", return_value="test-cpu"), patch(
+                        "runner.platform.platform", return_value="test-os"), patch(
+                        "runner.subprocess.run") as child, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run(args), 1)
+                child.assert_not_called()
+                batch = next(Path(temp).glob("batch-*"))
+                checks = read_json(batch / "checks.json")
+                self.assertEqual(checks["verdict"], "FAIL")
+
     def test_collector_excludes_seed_and_api_credentials_and_redacts_dsns(self):
         credentials = {"MODEL_A_X_SEED_DSN": "postgresql://seed:seed-pass@localhost/model_a_x",
                        "MODEL_A_Z_SEED_DSN": "postgresql://seed:z-seed-pass@localhost/model_a_z",
