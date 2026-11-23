@@ -747,7 +747,7 @@ def export_implementation_events(command, execution):
     auth_names = set(execution.config.get("auth_env", {}).values())
     # The collector needs read-only DB credentials, never seed DSNs or API tokens.
     environment = {k: v for k, v in os.environ.items()
-                   if k in ("MODEL_A_X_EVIDENCE_DSN", "MODEL_A_Y_EVIDENCE_DSN")
+                   if k in ("MODEL_A_X_EVIDENCE_DSN", "MODEL_A_Y_EVIDENCE_DSN", "MODEL_A_Z_EVIDENCE_DSN")
                    or (k not in auth_names and not any(s in k.upper() for s in CREDENTIAL_MARKERS))}
     try:
         completed = subprocess.run(
@@ -871,7 +871,7 @@ def final_gate(model, rows, expected_plan, batch):
                 missing.append("successful run completion event missing")
             wrapper = read_json(path / "evidence/implementation-events.json")
             events = [parse_json(line) for line in wrapper["body"].splitlines() if line.strip()]
-            if not events:
+            if not events and (row["test_id"] not in ("AC-02", "AC-03") or row.get("command_results")):
                 missing.append("implementation history empty")
             if any(e["run_id"] != row["run_id"] or e["model"] != model for e in events):
                 missing.append("implementation history identity mismatch")

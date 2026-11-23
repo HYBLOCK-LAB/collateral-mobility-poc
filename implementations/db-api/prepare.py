@@ -1,4 +1,4 @@
-"""Coordinator-owned X/Y S0 loader; requires the Model A tables from PR #4."""
+"""Coordinator-owned S0 loader; XYZ requires the Model A Z tables from PR #8."""
 
 import argparse
 import json
@@ -43,25 +43,30 @@ def seed_rows(fixture, platform):
                 or bundle["quantity"]["unit"] != "KRW_FACE_VALUE"
                 or bundle["reference_value"]["currency"] != "KRW"):
             raise CheckError("fixture cannot be represented by current Model A storage")
-    kind = {"X": "REPO", "Y": "LOAN"}[platform]
+    kind = {"X": "REPO", "Y": "LOAN", "Z": None}[platform]
     agreements = []
     for row in fixture["agreements"]:
         if row["type"] == kind:
             terms = {k: v for k, v in row.items() if k not in ("agreement_id", "bundle_id", "type")}
             agreements.append((row["agreement_id"], row["bundle_id"], kind, terms))
-    return {
+    mapped = {
         "principals": [(p["principal_id"], p["actor"], p["observer"]) for p in fixture["principals"]],
         "bundles": [(b["bundle_id"], b["security_id"], b["quantity"]["value"],
                      b["reference_value"]["amount"]) for b in fixture["bundles"]],
         "agreements": agreements,
         "rights": [(b["bundle_id"], b["initial_holder"]) for b in fixture["bundles"]] if platform == "X" else [],
     }
+    if platform == "Z":
+        mapped["margin_calls"] = [tuple(row[key] for key in (
+            "margin_call_id", "bundle_id", "provider", "ccp", "whole_bundle_accepted",
+            "eligibility_passed", "status")) for row in fixture["margin_calls"]]
+    return mapped
 
 
-def prepare(run_id, fixture):
+def prepare(run_id, fixture, stage="xy"):
     valid_run(run_id)
-    mapped = {p: seed_rows(fixture, p) for p in ("X", "Y")}
-    # Preflight both databases before writing either. Primary keys also reject races.
+    mapped = {p: seed_rows(fixture, p) for p in {"xy": ("X", "Y"), "xyz": ("X", "Y", "Z")}[stage]}
+    # Preflight every selected database before writing any. Primary keys reject races.
     for platform in mapped:
         with connect(platform, "SEED") as connection:
             if connection.execute("SELECT 1 FROM runs WHERE run_id = %s", (run_id,)).fetchone():
@@ -87,6 +92,11 @@ def prepare(run_id, fixture):
                     connection.execute(
                         "INSERT INTO rights(run_id,bundle_id,created_version,holder,status,allowed_commands) "
                         "VALUES (%s,%s,0,%s,'AVAILABLE',%s)", (run_id, bundle, holder, Jsonb(["CONFIRM_REPO"])))
+                for margin in rows.get("margin_calls", []):
+                    connection.execute(
+                        "INSERT INTO margin_calls(run_id,margin_call_id,bundle_id,provider,ccp,"
+                        "whole_bundle_accepted,eligibility_passed,status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (run_id, *margin))
             completed.append(platform)
     except Exception:
         # Separate databases cannot commit atomically. Never erase a partial run.
@@ -96,11 +106,12 @@ def prepare(run_id, fixture):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("stage", nargs="?", choices=("xy", "xyz"), default="xy")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--fixture", required=True, type=Path)
     args = parser.parse_args()
     try:
-        prepare(args.run_id, read_json(args.fixture))
+        prepare(args.run_id, read_json(args.fixture), args.stage)
     except Exception as error:
         # Driver errors and DSNs may contain credentials; never print their messages.
         reason = str(error) if isinstance(error, CheckError) else type(error).__name__

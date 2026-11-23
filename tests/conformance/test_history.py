@@ -94,3 +94,23 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(final_gate("A", [row], [case], batch), [])
             (path / "evidence/implementation-events.json").write_text("{}")
             self.assertTrue(final_gate("A", [row], [case], batch))
+
+    def test_final_gate_empty_history_matches_collection_rules(self):
+        _, _, events = history_fixture()
+        for test_id, accepted, allowed in (("AC-02", [], True), ("AC-03", [], True),
+                                           ("AC-01", [], False), ("AC-02", [[{}, {}]], False)):
+            with self.subTest(test_id=test_id, accepted=accepted), tempfile.TemporaryDirectory() as temp:
+                batch = Path(temp)
+                path = batch / "run"
+                (path / "evidence").mkdir(parents=True)
+                (path / "manifest.json").write_text(json.dumps({"run_id": "run-history", "model": "A"}))
+                finish = events[-1] | {"event_type": "RUN_FINISHED", "verdict": "PASS"}
+                (path / "events.jsonl").write_text(json.dumps(finish)+"\n")
+                (path / "evidence/implementation-events.json").write_text(json.dumps({"body": ""}))
+                case = {"test_id": test_id, "variant": "empty", "repeat": 1}
+                row = dict(case, run_id="run-history", model="A", path="run", verdict="PASS",
+                           evidence_complete=True, command_results=accepted, race_requests=[])
+                row["evidence_sha256"] = {str(p.relative_to(path)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                          for p in path.rglob("*") if p.is_file()}
+                (path / "checks.json").write_text(json.dumps(row))
+                self.assertEqual(not final_gate("A", [row], [case], batch), allowed)
