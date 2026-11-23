@@ -14,7 +14,7 @@ MESSAGE_SENT/MESSAGE_RECEIVED events
                event that does not is reported and left out of the checks below)
   ids          are <purpose>:<32 hex>[:p<n>]:req|res with a purpose of the
                adapter's MESSAGE_PURPOSES, each ID once; state reads carry a page
-               number, submissions do not
+               number, submissions (submit, and B2's unassign and assign) do not
   shape        SENT is a REQUEST from canton-adapter-<P> to that platform's
                participant, RECEIVED a RESPONSE back; the category is the
                purpose's
@@ -38,7 +38,8 @@ MESSAGE_SENT/MESSAGE_RECEIVED events
                read's pages are numbered from 1 and page n+1 is sent only after
                page n was received, for the same attempt and purpose
   submit       each INTERNAL_COMMITTED follows the RECEIVED of a submission of its
-               request (the adapter writes it from the confirmed response)
+               request (the adapter writes it from the confirmed response): a
+               submit, or for a B2 reassignment its assign
 and lists the calls whose response was not logged (an answer lost or not read
 whole, which the adapter's recovery handles: reported, not a failure).
 
@@ -73,7 +74,7 @@ directory that also holds older runs).
 
 It prints, per run, the messages by category, purpose and kind, counting message
 IDs as tests/conformance/report.py counts N_message, then the spread of each
-count over the runs, the state reads (every purpose but submit) by the number
+count over the runs, the state reads (every purpose but the submissions) by the number
 of pages they read, how many runner calls the context check matched (by the
 GET they answer, command for the rest, snapshot-file for the snapshot GETs that
 snapshot files record), the untraced snapshot files and the folders not
@@ -112,7 +113,12 @@ MESSAGE_ID = re.compile(
     r":(?P<end>req|res)$"
 )
 ATTRIBUTION = ("test_id", "attempt_id", "request_id", "bundle_id", "actor")
-PAGED = {purpose for purpose in MESSAGE_PURPOSES if purpose != "submit"}
+# Ledger submissions: one call each, no pages. A reassignment (B2) commits
+# with its assign, after its unassign.
+SUBMISSIONS = ("submit", "unassign", "assign")
+COMMITTING = ("submit", "assign")
+assert set(SUBMISSIONS) <= set(MESSAGE_PURPOSES)
+PAGED = {purpose for purpose in MESSAGE_PURPOSES if purpose not in SUBMISSIONS}
 # The fields a GET read carries besides its test and attempt (server.py query_trail).
 QUERY_FIELDS = {
     "result": {"request_id", "actor"},
@@ -348,7 +354,7 @@ def check_run(
 
     submissions = defaultdict(set)  # clock -> (request_id, kind) of submit messages
     for event in messages:
-        if event["message_id"].startswith("submit:"):
+        if event["message_id"].split(":", 1)[0] in COMMITTING:
             submissions[event["clock_id"]].add(
                 (event["request_id"], event["event_type"])
             )
@@ -484,7 +490,7 @@ def check_run(
         ):
             problems.append(f"{where}: RECEIVED on another clock or command")
         answered.add(stem)
-        if purpose == "submit":
+        if purpose in COMMITTING:
             submitted[clock].add(event["request_id"])
     unanswered = sorted(stem for stem in sent if stem not in answered)
     for call in by_attempt.values():

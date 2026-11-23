@@ -1,4 +1,4 @@
-"""Platform adapter of the Canton B1 model (implementations/canton/README.md §2).
+"""Platform adapter of the Canton B1 and B2 models (implementations/canton/README.md §2).
 
 One process per platform: X (Repo, on participant P_X), Y (securities
 lending, on P_Y) and Z (CCP margin, on P_Z). It serves the common HTTP
@@ -15,10 +15,11 @@ Y exercise the pre-agreement's choice on the ledger, the result query, the Y
 readiness and the snapshot. Every read takes the run's active contracts from
 the participant at that moment.
 
-Stage 3 (README §3 "결과 상태와 멱등성"): business rejections with the common
-codes, idempotent replay per (run, authenticated actor, request id), request
-id conflicts, contention and recovery. Committed requests are kept by the
-ledger (the trade contract names its request); rejected requests are kept in
+Stage 3 (README §3 "결과 상태와 멱등성"): rejections with the common codes,
+idempotent replay per (run, authenticated actor, request id), request id
+conflicts, contention and recovery. Committed requests are kept by the
+ledger (the trade contract names its request); rejected requests, and on B2
+the reassignments, are kept in
 $CANTON_STATE_DIR/requests/<platform>/<run_id>.jsonl; requests in progress
 and submissions whose ledger answer was lost are kept in this process only.
 
@@ -27,6 +28,15 @@ margin call's choice, which locks BANK_C's right in place, creates the
 allocation and satisfies the margin call; the Z readiness and the snapshot's
 margin calls and allocations. The ledger must have been bootstrapped with the
 b1-xyz topology (ids.json); the adapter refuses to start on another one.
+
+B2 (README §3 B2): on a ledger bootstrapped with the b2 topology (S1 and S2)
+the same adapters run X on S1 and Y and Z on S2. X also takes
+REASSIGN_FOR_LENDING from BANK_B: it declares the right Y needs in
+<run_id>/contracts.json once CONFIRM_REPO creates it, unassigns it from S1
+and assigns it to S2 through the Ledger API, keeps each call's raw request
+and response under <run_id>/reassignment/, and logs the reassignment events
+of event.schema with SOURCE_UNUSABLE when S1 gives the right up and
+TARGET_USABLE when P_X shows it on S2.
 
 Participant calls (README §3 "Participant 호출 기록", measurement.md §8.3): every
 call a command makes to the participant (the submission, the state reads that
@@ -41,10 +51,12 @@ X-Test-ID logs none. Calls made at start-up are not logged.
 
 Environment (scripts/adapter.sh provides it through scripts/env.sh):
   CANTON_STATE_DIR     ids.json from the Canton bootstrap; adapter-<P>.ready;
-                       requests/<P>/ (rejection records)
+                       requests/<P>/ (rejection and reassignment records)
   POC_BANK_A_TOKEN, POC_BANK_B_TOKEN, POC_BANK_C_TOKEN, POC_OBSERVER_TOKEN
                        local credentials; their values are never logged
-  CANTON_EVIDENCE_DIR  root of <run_id>/events.jsonl (default: logs/)
+  CANTON_EVIDENCE_DIR  root of <run_id>/events.jsonl, and on B2 of
+                       <run_id>/contracts.json and <run_id>/reassignment/
+                       (default: logs/)
   CANTON_RESPONSE_WAIT seconds a submission waits for its final result before
                        it answers PENDING (default 4.0, interface §6.2)
 """
@@ -82,9 +94,14 @@ IMPL_DIR = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = IMPL_DIR.parent.parent / "shared/schemas"
 DAR = IMPL_DIR / "daml/collateral/.daml/dist/collateral-0.4.0.dar"
 PACKAGE = "collateral"
-# The ledger topology this DAR and PLATFORMS belong to (ids.json, written by
-# canton/bootstrap-b1-xy.canton). The X→Y evidence ledgers are "b1-xy".
-TOPOLOGY = "b1-xyz"
+# The ledger topologies this DAR and PLATFORMS belong to (ids.json, written by
+# canton/bootstrap-b1-xy.canton as "b1-xyz" and by canton/bootstrap-b2.canton).
+# The X→Y evidence ledgers are "b1-xy".
+B1_TOPOLOGY = "b1-xyz"
+B2_TOPOLOGY = "b2"
+# B2 (README §2): the synchronizer each platform's contracts and transactions
+# are on. X stays on S1; Y and Z work on S2.
+HOME = {"X": "S1", "Y": "S2", "Z": "S2"}
 WARMUP_TEMPLATE = f"#{PACKAGE}:Collateral.Warmup:Warmup"
 # Business templates by module:entity (README §3). The ledger reports a
 # contract's template as <package id>:<module>:<entity>.
@@ -106,6 +123,11 @@ ACS_PAGE_SIZE = 500
 LOCAL_WAIT = 2.0
 LOCAL_POLL = 0.05
 SUBMIT_PATH = "/v2/commands/submit-and-wait-for-transaction"
+REASSIGN = "REASSIGN_FOR_LENDING"
+REASSIGN_PATH = "/v2/commands/submit-and-wait-for-reassignment"
+# B2: how long the X adapter looks for a reassigned contract among its
+# participant's active contracts on S2 before it gives up on TARGET_USABLE.
+USABLE_WAIT = LOCAL_WAIT
 # Participant calls logged as messages (README §3 "Participant 호출 기록"), by
 # the purpose that starts their message IDs: the submission (and its
 # resubmissions), the state read that decides a command, the reads again while
@@ -120,6 +142,11 @@ MESSAGE_PURPOSES = {
     "poll": "BUSINESS_INTEGRATION",
     "recheck": "BUSINESS_INTEGRATION",
     "local-check": "OPERATIONAL",
+    # B2 REASSIGN_FOR_LENDING: the unassignment and assignment of a contract,
+    # and the reads that look for it on S2 for TARGET_USABLE (like local-check).
+    "unassign": "BUSINESS_INTEGRATION",
+    "assign": "BUSINESS_INTEGRATION",
+    "usable-check": "OPERATIONAL",
     "result": "HARNESS",
     "readiness": "HARNESS",
     "snapshot": "HARNESS",
@@ -159,7 +186,6 @@ WILDCARD = [
     }
 ]
 MAX_BODY = 64 * 1024
-MODEL = "B1"
 OBSERVER = "OBSERVER"
 INSTITUTIONS = ("BANK_A", "BANK_B", "BANK_C")
 TOKEN_ENV = {
@@ -331,17 +357,61 @@ class Trail(NamedTuple):
 
 class Message(NamedTuple):
     """One participant call logged as messages: its trail, and the stem of the
-    IDs of its request (<stem>:req) and response (<stem>:res)."""
+    IDs of its request (<stem>:req) and response (<stem>:res).
+
+    sent: given for a call that must not be sent unlogged (the B2
+    reassignment calls, whose api_calls evidence names their MESSAGE_SENT).
+    The MESSAGE_SENT event_id is appended to it, and when that event cannot
+    be written the call stops before its request is written
+    (MessageNotLogged)."""
 
     trail: Trail
     stem: str
+    sent: list | None = None
+
+
+class MessageNotLogged(Exception):
+    """The MESSAGE_SENT of a call given Message.sent was not written: the
+    request was not sent. Not an OSError, so aiohttp lets it through from
+    the trace hook instead of turning it into a connection error, after it
+    closes the connection."""
 
 
 class Active(NamedTuple):
-    """An active contract of the run: Canton contract id and create argument."""
+    """An active contract of the run: Canton contract id and create argument.
+
+    B2 also reads where it is: the synchronizer it is assigned to, or
+    incomplete=True while it is unassigned and not yet assigned (no
+    synchronizer: it cannot be used on either), with the id of that
+    reassignment when the ledger reports it."""
 
     cid: str
     arg: dict
+    synchronizer: str | None = None
+    incomplete: bool = False
+    reassignment: str | None = None
+
+
+class Call:
+    """One B2 unassign or assign call (README §3 B2): the request body as it
+    is sent and kept (without headers), the event_id of its MESSAGE_SENT once
+    that is written, and the call it repeats, if any."""
+
+    def __init__(self, operation: str, contract_id: str, retry_of: str | None = None):
+        self.operation, self.contract_id, self.retry_of = operation, contract_id, retry_of
+        self.stem = f"{operation.lower()}:{uuid.uuid4().hex}"
+        self.request = b""
+        self.sent: list[str] = []
+
+    @property
+    def call_id(self) -> str:
+        """The message_id of its MESSAGE_SENT (reassignment_check api_calls)."""
+        return f"{self.stem}:req"
+
+    def file(self, part: str) -> str:
+        """Its raw request or response file, relative to the run's evidence
+        directory."""
+        return f"reassignment/{self.stem.replace(':', '-')}-{part}.json"
 
 
 class Verdict(NamedTuple):
@@ -509,35 +579,62 @@ class EventLog:
     """Implementation events of one adapter process: one producer, one clock.
 
     Lines go to <root>/<run_id>/events.jsonl, which the X, Y and Z processes share,
-    hence O_APPEND under flock. The time, the sequence number and the write
-    happen without an await in between, so on the single event-loop thread no
-    other request can take a later time with an earlier sequence. The line is
+    hence O_APPEND under flock. The time and the sequence number are taken
+    together (reserve), so on the single event-loop thread no other request
+    can take a later time with an earlier sequence. An event written with
+    them at once (B1, and every B2 event but UNASSIGNMENT_STARTED) is also
+    written without an await in between; B2's UNASSIGNMENT_STARTED takes them
+    before the unassign call and is written after it, so the lines of one
+    process are in sequence order only once sorted by sequence. The line is
     written (not fsynced) before the HTTP response is sent.
     """
 
-    def __init__(self, root: Path, platform: str, boot_id: str):
-        self.root, self.platform = root, platform
+    def __init__(self, root: Path, platform: str, boot_id: str, model: str):
+        self.root, self.platform, self.model = root, platform, model
         self.producer = f"canton-adapter-{platform}"
         self.clock = f"canton-adapter-{platform}-{boot_id}"
         self.sequence = 0
 
-    def write(self, event_type: str, run_id: str, test_id: str, **fields) -> None:
+    def reserve(self) -> dict:
+        """The sequence number and times of an event that is written later
+        (write(stamp=...)): B2 takes them when the unassignment starts and
+        writes UNASSIGNMENT_STARTED once the ledger has accepted it, so an
+        unassignment the ledger refused leaves no start event. The sequence
+        numbers in between stay unused if the event is never written."""
+        stamp = {
+            "sequence": self.sequence,
+            "mono_ns": str(time.monotonic_ns()),
+            "utc_time": datetime.now(timezone.utc)
+            .isoformat(timespec="microseconds")
+            .replace("+00:00", "Z"),
+        }
+        self.sequence += 1
+        return stamp
+
+    def write(
+        self,
+        event_type: str,
+        run_id: str,
+        test_id: str,
+        stamp: dict | None = None,
+        **fields,
+    ) -> str:
+        """Write one event; returns its event_id."""
         event: dict[str, object] = {key: None for key in EVENT_NULLABLE}
         event.update(fields)
+        if stamp is None:
+            stamp = self.reserve()
+        event_id = "event-" + uuid.uuid4().hex
         event.update(
-            event_id="event-" + uuid.uuid4().hex,
+            event_id=event_id,
             event_type=event_type,
-            model=MODEL,
+            model=self.model,
             test_id=test_id,
             run_id=run_id,
             platform=self.platform,
             producer_id=self.producer,
             clock_id=self.clock,
-            sequence=self.sequence,
-            mono_ns=str(time.monotonic_ns()),
-            utc_time=datetime.now(timezone.utc)
-            .isoformat(timespec="microseconds")
-            .replace("+00:00", "Z"),
+            **stamp,
         )
         line = memoryview((json.dumps(event, separators=(",", ":")) + "\n").encode())
         directory = self.root / run_id
@@ -551,15 +648,13 @@ class EventLog:
                 line = line[os.write(fd, line) :]
         finally:
             os.close(fd)  # also releases the lock
-        self.sequence += 1
+        return event_id
 
 
 class Adapter:
     def __init__(self, platform: str, port: int):
         self.platform, self.port = platform, port
         self.spec = PLATFORMS[platform]
-        self.commands = self.spec["commands"]
-        self.actors = set(self.commands.values())
         self.boot_id = secrets.token_hex(6)
         state_dir = os.environ.get("CANTON_STATE_DIR")
         if not state_dir:
@@ -568,17 +663,32 @@ class Adapter:
         ids = json.loads((self.state_dir / "ids.json").read_text())
         # Checked before anything is uploaded: the X→Y evidence ledgers keep
         # the package version their evidence was produced with (README §4).
-        if ids.get("topology") != TOPOLOGY:
+        topology = ids.get("topology")
+        if topology not in (B1_TOPOLOGY, B2_TOPOLOGY):
             raise SystemExit(
-                f"{self.state_dir} holds a {ids.get('topology')} ledger, not "
-                f"{TOPOLOGY}: start it from the commit that bootstrapped it (README §4)"
+                f"{self.state_dir} holds a {topology} ledger, not {B1_TOPOLOGY} "
+                f"or {B2_TOPOLOGY}: start it from the commit that bootstrapped it "
+                "(README §4)"
             )
+        # B2 (README §2): the same adapters on two synchronizers. X also takes
+        # the reassignment of BANK_B's right to S2 (REASSIGN_FOR_LENDING).
+        self.b2 = topology == B2_TOPOLOGY
+        self.model = "B2" if self.b2 else "B1"
+        self.commands = dict(self.spec["commands"])
+        if self.b2 and platform == "X":
+            self.commands[REASSIGN] = "BANK_B"
+        self.actors = set(self.commands.values())
         self.ledger_url = ids["json_api"][self.spec["participant"]]
         self.parties = ids["parties"]
         self.names = {party: name for name, party in self.parties.items()}
         # interface §13: a response counter per platform and run (this process).
         self.snapshot_seq: dict[str, int] = {}
-        self.synchronizer = ids["synchronizers"]["S1"]
+        # Synchronizer ids by name ("S1", and "S2" on B2), and this platform's
+        # own synchronizer: where it reads and submits.
+        self.synchronizers: dict[str, str] = dict(ids["synchronizers"])
+        self.sync_names = {sid: name for name, sid in self.synchronizers.items()}
+        self.home = HOME[platform] if self.b2 else "S1"
+        self.synchronizer = self.synchronizers[self.home]
         # The vetting list names participants without the PAR:: prefix of ids.json.
         self.participants = {
             name: uid.removeprefix("PAR::") for name, uid in ids["participants"].items()
@@ -586,19 +696,20 @@ class Adapter:
         self.package_id = dar_main_package(DAR)
         self.tokens = self.load_tokens()
         evidence = os.environ.get("CANTON_EVIDENCE_DIR") or str(IMPL_DIR / "logs")
-        self.events = EventLog(Path(evidence), platform, self.boot_id)
+        self.events = EventLog(Path(evidence), platform, self.boot_id, self.model)
         schema = json.loads((SCHEMA_DIR / "command.schema.json").read_text())
         Draft202012Validator.check_schema(schema)
         self.command_schema = Draft202012Validator(schema)
         self.ready_file = self.state_dir / f"adapter-{platform}.ready"
         self.response_wait = response_wait()
         # Request records by (run_id, actor, request_id) (interface §6.3).
-        # Rejections are kept on disk until the run's results are checked;
-        # the task deciding a key, the submissions waiting for the ledger and
-        # the submissions whose answer was lost live in this process.
+        # Rejections, and on B2 X the reassignments, are kept on disk until
+        # the run's results are checked; the task deciding a key, the
+        # submissions waiting for the ledger and the submissions whose answer
+        # was lost live in this process.
         self.requests_dir = self.state_dir / "requests" / platform
         self.requests_dir.mkdir(parents=True, exist_ok=True)
-        self.rejections: dict[str, dict[tuple[str, str], dict]] = {}
+        self.kept: dict[str, dict[tuple[str, str], dict]] = {}
         self.tasks: dict[tuple[str, str, str], Work] = {}
         self.inflight: dict[tuple[str, str, str], Submission] = {}
         self.unknown: dict[tuple[str, str, str], dict] = {}
@@ -623,6 +734,17 @@ class Adapter:
     async def ledger(
         self, method: str, path: str, message: Message | None = None, **kwargs
     ) -> tuple[int, object]:
+        """One participant call and its parsed answer (ledger_raw)."""
+        status, raw = await self.ledger_raw(method, path, message, **kwargs)
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            body = raw[:500].decode(errors="replace")
+        return status, body
+
+    async def ledger_raw(
+        self, method: str, path: str, message: Message | None = None, **kwargs
+    ) -> tuple[int, bytes]:
         """One participant call. With a message, its request is logged when the
         connection is held and the request is handed to it for writing
         (request_sent: the attempt to send), its response when it has been read
@@ -642,11 +764,7 @@ class Adapter:
         except (ClientError, asyncio.TimeoutError) as error:
             # Sent, or possibly sent: the participant may have acted on it.
             raise LedgerUnreachable(f"{method} {path}: {error!r}") from error
-        try:
-            body = json.loads(raw) if raw else {}
-        except ValueError:
-            body = raw[:500].decode(errors="replace")
-        return reply.status, body
+        return reply.status, raw
 
     async def request_sent(self, session, context, params) -> None:
         """aiohttp trace hook (on_request_headers_sent): the participant call's
@@ -661,14 +779,17 @@ class Adapter:
         its response, under the run event fields of its command or query. A
         call made for no attributable command, or for a GET without X-Test-ID,
         logs nothing. A log failure does not fail the call: the participant may
-        already have acted on it."""
+        already have acted on it. The exception is the MESSAGE_SENT of a call
+        given Message.sent, written before its request: when it fails the
+        request is not sent (MessageNotLogged)."""
         trail = message.trail
         if not trail.test_id:
             return
         request = event_type == "MESSAGE_SENT"
+        strict = request and message.sent is not None
         adapter, participant = self.events.producer, self.spec["participant"]
         try:
-            self.events.write(
+            event_id = self.events.write(
                 event_type,
                 trail.run_id,
                 trail.test_id,
@@ -679,8 +800,13 @@ class Adapter:
                 destination_id=participant if request else adapter,
                 **trail.fields,
             )
-        except Exception:
+        except Exception as error:
             log.exception("%s of %s not logged", event_type, message.stem)
+            if strict:
+                raise MessageNotLogged(f"{event_type} of {message.stem}") from error
+            return
+        if strict:
+            message.sent.append(event_id)
 
     def party_filter(self) -> dict:
         """Every contract a party hosted on this platform's participant sees."""
@@ -720,6 +846,12 @@ class Adapter:
             "eventFormat": self.party_filter(),
             "maxPageSize": ACS_PAGE_SIZE,
         }
+        # B2: a contract in the middle of a reassignment is left out of the
+        # active contracts unless incomplete reassignments are asked for.
+        # Asking for them keeps it in sight, marked incomplete.
+        incomplete: dict[str, tuple[str, dict, str | None]] = {}
+        if self.b2:
+            query["includeIncompleteReassignments"] = True
         read = f"{trail.purpose}:{uuid.uuid4().hex}" if trail is not None else None
         pages = 0
         while True:
@@ -731,25 +863,69 @@ class Adapter:
             if status != 200 or not isinstance(page, dict):
                 raise LedgerUnreachable(f"active contracts: {status} {page}")
             for entry in page.get("activeContracts", []):
-                active = entry.get("contractEntry", {}).get("JsActiveContract")
-                if active is None:  # one synchronizer: no reassignment entries
-                    raise LedgerUnreachable(f"unexpected contract entry {list(entry)}")
-                event = active["createdEvent"]
+                contract_entry = entry.get("contractEntry", {})
+                active = contract_entry.get("JsActiveContract")
+                if active is not None:
+                    event = active["createdEvent"]
+                    synchronizer = self.sync_names.get(active.get("synchronizerId"))
+                    if self.b2 and synchronizer is None:
+                        raise LedgerUnreachable(
+                            f"active contract on an unknown synchronizer "
+                            f"{active.get('synchronizerId')}"
+                        )
+                elif self.b2:
+                    event, reassignment = self.incomplete_event(contract_entry)
+                    synchronizer = None
+                else:  # B1, one synchronizer: no reassignment entries
+                    raise LedgerUnreachable(
+                        f"unexpected contract entry {list(entry)}"
+                    )
                 if event.get("packageName") != PACKAGE:
                     continue
                 entity = event["templateId"].split(":", 1)[1]
                 argument = event["createArgument"]
-                if (
-                    entity in found
-                    and argument.get("runId") == run_id
-                    and event["contractId"] not in seen
-                ):
-                    seen.add(event["contractId"])
-                    found[entity].append(Active(event["contractId"], argument))
+                if entity not in found or argument.get("runId") != run_id:
+                    continue
+                cid = event["contractId"]
+                if synchronizer is None and self.b2:
+                    incomplete.setdefault(cid, (entity, argument, reassignment))
+                elif cid not in seen:
+                    seen.add(cid)
+                    found[entity].append(
+                        Active(cid, argument, synchronizer if self.b2 else None)
+                    )
             token = page.get("nextPageToken")
             if not token:
-                return found
+                break
             query["pageToken"] = token
+        # One contract is either assigned or in a reassignment; a contract the
+        # read saw both ways counts as assigned.
+        for cid, (entity, argument, reassignment) in incomplete.items():
+            if cid not in seen:
+                found[entity].append(
+                    Active(cid, argument, None, incomplete=True, reassignment=reassignment)
+                )
+        return found
+
+    @staticmethod
+    def incomplete_event(contract_entry: dict) -> tuple[dict, str | None]:
+        """The created event of a contract in a reassignment (B2) and the
+        reassignment id: JsIncompleteUnassigned carries the event next to the
+        unassignment, JsIncompleteAssigned inside the assignment."""
+        for kind, value in contract_entry.items():
+            value = value.get("value", value) if isinstance(value, dict) else value
+            if not isinstance(value, dict):
+                break
+            if kind == "JsIncompleteUnassigned" and "createdEvent" in value:
+                unassigned = value.get("unassignedEvent") or {}
+                unassigned = unassigned.get("value", unassigned)
+                return value["createdEvent"], unassigned.get("reassignmentId")
+            if kind == "JsIncompleteAssigned":
+                assigned = value.get("assignedEvent", {})
+                assigned = assigned.get("value", assigned)
+                if "createdEvent" in assigned:
+                    return assigned["createdEvent"], assigned.get("reassignmentId")
+        raise LedgerUnreachable(f"unexpected contract entry {list(contract_entry)}")
 
     async def prepared_run(
         self, run_id: str, trail: Trail | None = None
@@ -778,20 +954,52 @@ class Adapter:
             raise ValueError("a contract names a party outside ids.json")
         return name
 
-    async def prepare_ledger(self) -> list[float]:
-        """Upload and vet the DAR, wait until every participant has vetted it on S1,
-        then run the warm-up transactions; returns their ms."""
-        status, body = await self.ledger(
-            "POST",
-            "/v2/dars",
-            params={"vetAllPackages": "true"},
-            data=DAR.read_bytes(),
-            headers={"Content-Type": "application/octet-stream"},
+    def away(self, contract: Active) -> bool:
+        """B2: whether a contract cannot be used on this platform's
+        synchronizer: it is assigned to the other one or in a reassignment.
+        A transaction given such an input would be reassigned by the ledger
+        on its own, which the adapter never lets happen (README §3 B2)."""
+        return self.b2 and (contract.incomplete or contract.synchronizer != self.home)
+
+    def away_right(self) -> Verdict:
+        # absent: the right may be on its way here (a reassignment the
+        # participant has not applied yet), so decide reads again for a while.
+        return Verdict(
+            "RIGHT_UNAVAILABLE",
+            f"the right is not usable on {self.home} (another synchronizer or "
+            "a reassignment)",
+            absent=True,
         )
-        if status != 200:
-            raise SystemExit(
-                f"DAR upload to {self.spec['participant']} failed: {status} {body}"
+
+    async def prepare_ledger(self) -> list[float]:
+        """Upload and vet the DAR, wait until every participant has vetted it on
+        every synchronizer, then run the warm-up transactions; returns their ms.
+
+        B2: a participant on two synchronizers cannot tell where to vet an
+        upload without a synchronizer id (400
+        PACKAGE_SERVICE_CANNOT_AUTODETECT_SYNCHRONIZER), so the DAR is uploaded
+        once for S1 and once for S2."""
+        targets: list[str | None] = (
+            [self.synchronizers[name] for name in ("S1", "S2")] if self.b2 else [None]
+        )
+        dar = DAR.read_bytes()
+        for synchronizer in targets:
+            params = {"vetAllPackages": "true"}
+            if synchronizer is not None:
+                params["synchronizerId"] = synchronizer
+            status, body = await self.ledger(
+                "POST",
+                "/v2/dars",
+                params=params,
+                data=dar,
+                headers={"Content-Type": "application/octet-stream"},
             )
+            if status != 200:
+                where = "" if synchronizer is None else f" for {self.sync_names[synchronizer]}"
+                raise SystemExit(
+                    f"DAR upload to {self.spec['participant']}{where} failed: "
+                    f"{status} {body}"
+                )
         await self.wait_vetted()
         party = self.parties[self.spec["warmup"]]
         timings = []
@@ -805,17 +1013,18 @@ class Adapter:
                 }
             }
             started = time.monotonic()
+            commands: dict[str, object] = {
+                "commands": [command],
+                "commandId": f"warmup-{self.platform}-{self.boot_id}-{i}",
+                "userId": f"adapter-{self.platform}",
+                "actAs": [party],
+            }
+            if self.b2:  # on the platform's own synchronizer
+                commands["synchronizerId"] = self.synchronizer
             status, body = await self.ledger(
                 "POST",
                 "/v2/commands/submit-and-wait-for-transaction",
-                json={
-                    "commands": {
-                        "commands": [command],
-                        "commandId": f"warmup-{self.platform}-{self.boot_id}-{i}",
-                        "userId": f"adapter-{self.platform}",
-                        "actAs": [party],
-                    }
-                },
+                json={"commands": commands},
             )
             if status != 200:
                 raise SystemExit(f"warm-up transaction {i} refused: {status} {body}")
@@ -826,10 +1035,13 @@ class Adapter:
         """A transaction is refused unless every participant hosting one of its
         informees has vetted the package. BANK_B is on P_X and P_Y, BANK_C on
         P_Y and P_Z, and each adapter uploads only to its own participant, so
-        the adapters wait here for each other's upload instead of racing."""
+        the adapters wait here for each other's upload instead of racing.
+        B2 waits for every participant on S1 and on S2."""
         query = {
             "packageMetadataFilter": {"packageIds": [self.package_id]},
-            "topologyStateFilter": {"synchronizerIds": [self.synchronizer]},
+            "topologyStateFilter": {
+                "synchronizerIds": list(self.synchronizers.values())
+            },
         }
         deadline = time.monotonic() + VETTING_TIMEOUT
         while True:
@@ -841,22 +1053,29 @@ class Adapter:
             if body.get("nextPageToken"):
                 raise SystemExit("package vetting list unexpectedly paged")
             vetted = {
-                entry["participantId"]
+                (entry["participantId"], entry.get("synchronizerId"))
                 for entry in body.get("vettedPackages", [])
                 if any(
                     pkg.get("packageId") == self.package_id
                     for pkg in entry.get("packages", [])
                 )
             }
+            if not self.b2:  # one synchronizer, asked for by id
+                vetted = {(uid, self.synchronizer) for uid, _ in vetted}
             missing = sorted(
-                name for name, uid in self.participants.items() if uid not in vetted
+                f"{name}@{sync}" if self.b2 else name
+                for name, uid in self.participants.items()
+                for sync, sid in self.synchronizers.items()
+                if (uid, sid) not in vetted
             )
             if not missing:
                 return
             if time.monotonic() > deadline:
+                where = "S1 and S2" if self.b2 else "S1"
                 raise SystemExit(
-                    f"package {self.package_id[:12]} not vetted on S1 by {missing} "
-                    f"after {VETTING_TIMEOUT}s (are the other adapters starting?)"
+                    f"package {self.package_id[:12]} not vetted on {where} by "
+                    f"{missing} after {VETTING_TIMEOUT}s (are the other adapters "
+                    "starting?)"
                 )
             await asyncio.sleep(0.5)
 
@@ -1040,6 +1259,7 @@ class Adapter:
         records = [
             Record(kind, c.arg)
             for kind in self.commands
+            if kind in CONFIRMATIONS  # B2 REASSIGN_FOR_LENDING keeps no record
             for c in found[CONFIRMATIONS[kind].record]
             if CONFIRMATIONS[kind].made(c.arg)
             and c.arg["requestId"] == request_id
@@ -1053,9 +1273,13 @@ class Adapter:
 
     # --- request records (interface §6.3) ---------------------------------
 
-    def rejections_of(self, run_id: str) -> dict[tuple[str, str], dict]:
-        """The run's rejected requests on this platform, read from disk once."""
-        table = self.rejections.get(run_id)
+    def kept_of(self, run_id: str) -> dict[tuple[str, str], dict]:
+        """The run's kept requests on this platform, read from disk once: the
+        rejections, and on B2 X the reassignments. The last line of a key
+        wins: a reassignment is kept as STARTED before its ledger calls and
+        again as COMMITTED or REJECTED once it is decided, or WITHDRAWN when
+        the ledger did not act on it (then no record is kept)."""
+        table = self.kept.get(run_id)
         if table is None:
             table = {}
             path = self.requests_dir / f"{run_id}.jsonl"
@@ -1064,18 +1288,59 @@ class Adapter:
                 end = data.rfind(b"\n") + 1
                 if end < len(data):
                     # A record cut short (the adapter stopped while writing it)
-                    # was never answered, since reject answers only after the
+                    # was never answered, since keep returns only after the
                     # whole line is synced: it is dropped and its request is
                     # decided again when it is resent.
-                    log.warning("%s: dropping a rejection record cut short", path)
+                    log.warning("%s: dropping a request record cut short", path)
                     os.truncate(path, end)
                     data = data[:end]
                 for line in data.decode().splitlines():
                     record = json.loads(line)
-                    if record.get("run_id") == run_id:
+                    if record.get("run_id") != run_id:
+                        continue
+                    if record.get("outcome") == "WITHDRAWN":
+                        table.pop((record["actor"], record["request_id"]), None)
+                    else:
                         table[(record["actor"], record["request_id"])] = record
-            self.rejections[run_id] = table
+            self.kept[run_id] = table
         return table
+
+    def keep(self, key: tuple[str, str, str], record: dict) -> None:
+        """Append a request record and sync it before the request goes on."""
+        run_id, actor, request_id = key
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        # Loaded first: a line an earlier process cut short is removed before
+        # this one is appended after it.
+        table = self.kept_of(run_id)
+        with open(self.requests_dir / f"{run_id}.jsonl", "a") as file:
+            file.write(line)
+            file.flush()
+            os.fsync(file.fileno())
+        if record.get("outcome") == "WITHDRAWN":
+            table.pop((actor, request_id), None)
+        else:
+            table[(actor, request_id)] = record
+
+    def withdraw(self, key: tuple[str, str, str], record: dict) -> None:
+        """Drop a STARTED reassignment the ledger did not act on: it is refused
+        as never accepted, and a resend is decided afresh."""
+        self.keep(key, {**record, "outcome": "WITHDRAWN"})
+
+    def kept_answer(self, record: dict, replayed: bool) -> dict:
+        """The result of a decided kept request: its rejection, or the
+        COMMITTED reassignment with its effect."""
+        if record.get("outcome") != "COMMITTED":
+            return self.rejected_of(record, replayed)
+        return {
+            "run_id": record["run_id"],
+            "request_id": record["request_id"],
+            "actor": record["actor"],
+            "command_type": record["command_type"],
+            "outcome": "COMMITTED",
+            "replayed": replayed,
+            "effect": record["effect"],
+            "error": None,
+        }
 
     def reject(
         self, key: tuple[str, str, str], command: dict, code: str, message: str
@@ -1091,15 +1356,7 @@ class Adapter:
             "code": code,
             "message": message,
         }
-        line = json.dumps(record, separators=(",", ":")) + "\n"
-        # Loaded first: a line an earlier process cut short is removed before
-        # this one is appended after it.
-        table = self.rejections_of(run_id)
-        with open(self.requests_dir / f"{run_id}.jsonl", "a") as file:
-            file.write(line)
-            file.flush()
-            os.fsync(file.fileno())
-        table[(actor, request_id)] = record
+        self.keep(key, record)
         self.unknown.pop(key, None)
         log.info(
             "%s %s %s rejected: %s %s",
@@ -1204,9 +1461,10 @@ class Adapter:
 
     def pending_of_run(self, run_id: str, found: dict[str, list[Active]]) -> list:
         """interface §8.1: requests sent to the ledger and not settled yet
-        (Canton locks the right a transaction uses while it is confirmed), and
-        requests answered UNKNOWN that the ledger may still commit: the state
-        shows no trade of theirs and they still pass the state check."""
+        (Canton locks the right a transaction uses while it is confirmed, and
+        a reassignment takes it off both synchronizers), and requests answered
+        UNKNOWN that the ledger may still commit: the state shows no trade of
+        theirs and they still pass the state check."""
         rows = [
             {
                 "request_id": key[2],
@@ -1229,6 +1487,22 @@ class Adapter:
             and key not in self.inflight
             and self.record_of(found, key[1], key[2]) is None
             and self.may_commit(found, key, command)
+        ]
+        # B2 X: a reassignment answered UNKNOWN with its contract unassigned
+        # and not assigned yet; no ledger call of it is going on until it is
+        # resent (README §3 B2).
+        incomplete = {c.cid for c in found[RIGHT] if c.incomplete}
+        rows += [
+            {
+                "request_id": request_id,
+                "bundle_id": json.loads(record["content"])["bundle_id"],
+                "kind": "REASSIGNING",
+                "blocks_use": True,
+            }
+            for (actor, request_id), record in self.kept_of(run_id).items()
+            if record.get("outcome") == "STARTED"
+            and (run_id, actor, request_id) not in self.inflight
+            and record.get("contract_id") in incomplete
         ]
         return sorted(rows, key=lambda row: row["request_id"])
 
@@ -1268,6 +1542,8 @@ class Adapter:
         if len(agreements) > 1:
             raise preparation_conflict("more than one pre-agreement for the bundle")
         agreement = agreements[0]
+        if self.away(agreement):
+            raise preparation_conflict(f"the pre-agreement is not on {self.home}")
         user = self.parties[role]
         if agreement.arg[confirmation.controller] != user:
             return Verdict(
@@ -1301,6 +1577,8 @@ class Adapter:
         if len(available) > 1:
             raise preparation_conflict("the actor holds more than one available right")
         right = available[0]
+        if self.away(right):
+            return self.away_right()
         if int(right.arg["createdVersion"]) != int(command["expected_version"]):
             return Verdict(
                 "VERSION_CONFLICT", "the bundle version is not the expected one"
@@ -1343,6 +1621,8 @@ class Adapter:
         if len(calls) > 1:
             raise preparation_conflict("more than one margin call for the bundle")
         call = calls[0]
+        if self.away(call):
+            raise preparation_conflict(f"the margin call is not on {self.home}")
         if call.arg["status"] != "OPEN" or call.arg["provider"] != user:
             return Verdict(
                 "PRECONDITION_NOT_MET", "the margin call is not open for the actor"
@@ -1374,6 +1654,8 @@ class Adapter:
         if len(available) > 1:
             raise preparation_conflict("the actor holds more than one available right")
         right = available[0]
+        if self.away(right):
+            return self.away_right()
         if int(right.arg["createdVersion"]) != int(command["expected_version"]):
             return Verdict(
                 "VERSION_CONFLICT", "the bundle version is not the expected one"
@@ -1394,6 +1676,531 @@ class Adapter:
                 "USE_NOT_PERMITTED", "the right does not permit this command"
             )
         return Verdict(None, agreement=call, right=right)
+
+    # --- B2 reassignment (README §3 B2) -------------------------------------
+
+    def judge_reassign(
+        self, found: dict[str, list[Active]], command: dict, role: str
+    ) -> Verdict:
+        """Check a new REASSIGN_FOR_LENDING against the run's state: the actor
+        holds one available right of the bundle, at the expected version,
+        assigned to the payload's source (command.schema fixes S1 → S2). The
+        right moves as it is: what it permits is checked by the command that
+        uses it on the target."""
+        bundle_id, holder = command["bundle_id"], self.parties[role]
+        rights = [
+            c
+            for c in found[RIGHT]
+            if c.arg["bundle"]["bundleId"] == bundle_id and c.arg["holder"] == holder
+        ]
+        if not rights:
+            # absent: the confirmation that gives the actor the right may not
+            # be applied on this participant yet.
+            return Verdict(
+                "PRECONDITION_NOT_MET",
+                f"{role} holds no right of the bundle",
+                absent=True,
+            )
+        available = [c for c in rights if c.arg["status"] == "AVAILABLE"]
+        if not available:
+            return Verdict(
+                "RIGHT_UNAVAILABLE", f"{role}'s right of the bundle is not available"
+            )
+        if len(available) > 1:
+            raise preparation_conflict(
+                f"{role} holds more than one available right of the bundle"
+            )
+        right = available[0]
+        version = int(right.arg["createdVersion"])
+        if version != int(command["expected_version"]):
+            return Verdict(
+                "VERSION_CONFLICT",
+                f"the bundle is at version {version}, not {command['expected_version']}",
+            )
+        if right.incomplete:
+            return Verdict("RIGHT_UNAVAILABLE", "the right is in a reassignment")
+        source = command["payload"]["source_synchronizer"]
+        if right.synchronizer != source:
+            return Verdict("PRECONDITION_NOT_MET", f"the right is not on {source}")
+        return Verdict(None, right=right)
+
+    async def reassign(
+        self,
+        key: tuple[str, str, str],
+        command: dict,
+        found: dict[str, list[Active]],
+        cid: str,
+        test_id: str,
+        fields: dict,
+        resumed: bool,
+    ) -> tuple[int, dict]:
+        """REASSIGN_FOR_LENDING: one reassignment of the bundle at a time.
+        Nothing is awaited between judge_reassign and the registration, so a
+        second request of the bundle sees this one and is rejected."""
+        run_id = key[0]
+        bundle_id = command["bundle_id"]
+        if any(
+            k != key
+            and k[0] == run_id
+            and s.bundle_id == bundle_id
+            and s.kind == "REASSIGNING"
+            for k, s in self.inflight.items()
+        ):
+            if resumed:
+                # It may have moved the contract already: not decided until
+                # it is resent.
+                return 503, self.unknown_of(key, command, replayed=True)
+            return self.reject(
+                key,
+                command,
+                "RIGHT_UNAVAILABLE",
+                "another reassignment of the bundle is in progress",
+            )
+        submission = Submission(bundle_id)
+        submission.kind = "REASSIGNING"
+        self.inflight[key] = submission
+        try:
+            return await self.move(key, command, found, cid, test_id, fields, resumed)
+        finally:
+            submission.answered.set()
+            if self.inflight.get(key) is submission:
+                del self.inflight[key]
+
+    def whereabouts(
+        self, found: dict[str, list[Active]], key: tuple[str, str, str], cid: str
+    ) -> Active | None:
+        """The contract a reassignment request moves, as the state shows it.
+        None when it is gone, or when another request of the run moved it:
+        then this request did not, and is judged afresh."""
+        run_id, role, request_id = key
+        if any(
+            other != (role, request_id)
+            and record.get("contract_id") == cid
+            and record.get("outcome") == "COMMITTED"
+            for other, record in self.kept_of(run_id).items()
+        ):
+            return None
+        return next((c for c in found[RIGHT] if c.cid == cid), None)
+
+    async def move(
+        self,
+        key: tuple[str, str, str],
+        command: dict,
+        found: dict[str, list[Active]],
+        cid: str,
+        test_id: str,
+        fields: dict,
+        resumed: bool,
+    ) -> tuple[int, dict]:
+        """Unassign the right from the source and assign it to the target as
+        the actor (BANK_B, hosted by P_X on both), then answer once P_X shows
+        it usable on the target (README §3 B2).
+
+        The request is kept as STARTED, naming the contract, before the first
+        ledger call. A request kept so (resumed) goes on from where the state
+        shows the contract: on the source it is judged again and unassigned,
+        in the reassignment it is assigned, on the target it is committed.
+        A call whose answer is lost, or that the ledger answered with an error
+        it may still act on (a timeout, a server error), leaves the request
+        STARTED and is answered UNKNOWN: resending it goes on the same way. A
+        request the ledger did not act on (not sent, or firmly refused while
+        the contract stays on the source) is withdrawn and refused, as if never
+        accepted. Events are
+        logged as the ledger's answers show them; a step this process did
+        not see logs nothing."""
+        run_id, role, request_id = key
+        payload = command["payload"]
+        source, target = payload["source_synchronizer"], payload["target_synchronizer"]
+        record = {
+            "run_id": run_id,
+            "actor": role,
+            "request_id": request_id,
+            "command_type": command["command_type"],
+            "content": canonical(command),
+        }
+        moved = {
+            "source_synchronizer": source,
+            "target_synchronizer": target,
+            **fields,
+        }
+        unassign: tuple[Call, str | None] | None = None  # this process unassigned it
+        tried = False
+        while True:
+            contract = self.whereabouts(found, key, cid)
+            if contract is not None and contract.incomplete:
+                reassignment = contract.reassignment
+                break
+            if contract is not None and contract.synchronizer == target:
+                # Assigned by an earlier attempt of this request.
+                return self.reassigned(key, command, record, cid, replayed=resumed)
+            verdict = self.judge_reassign(found, command, role)
+            if verdict.code is not None:
+                return self.reject(key, command, verdict.code, verdict.message)
+            if tried:
+                self.withdraw(key, record)
+                raise Refusal(
+                    "TEMPORARILY_UNAVAILABLE",
+                    "the ledger refused the unassignment for a reason the state "
+                    "does not explain",
+                )
+            tried, cid = True, verdict.right.cid
+            self.ensure_selection(run_id, cid, verdict.right.arg["rightId"])
+            self.keep(key, {**record, "outcome": "STARTED", "contract_id": cid})
+            stamp = self.events.reserve()
+            call = self.reassignment_call(
+                key,
+                "UNASSIGN",
+                cid,
+                {
+                    "contractId": cid,
+                    "source": self.synchronizers[source],
+                    "target": self.synchronizers[target],
+                },
+            )
+            try:
+                status, reply = await self.send_call(run_id, test_id, fields, call)
+            except (MessageNotLogged, LedgerNotReached) as error:
+                log.warning("%s %s: unassignment not sent: %s", run_id, request_id, error)
+                self.withdraw(key, record)
+                raise Refusal(
+                    "TEMPORARILY_UNAVAILABLE",
+                    f"participant {self.spec['participant']} cannot be reached now",
+                ) from error
+            except LedgerUnreachable as error:
+                log.warning("%s %s: unassignment answer lost: %s", run_id, request_id, error)
+                return 503, self.unknown_of(key, command, resumed)
+            event = self.reassignment_event(status, reply, "JsUnassignedEvent")
+            if (
+                event is not None
+                and event.get("contractId") == cid
+                and event.get("reassignmentId")
+            ):
+                reassignment = event["reassignmentId"]
+                ids = dict(moved, contract_id=cid, reassignment_id=reassignment)
+                self.note("UNASSIGNMENT_STARTED", run_id, test_id, stamp, **ids)
+                # Unassigned: the right cannot be used on the source any more,
+                # and not yet on the target (measurement.md §9).
+                self.note("SOURCE_UNUSABLE", run_id, test_id, **ids)
+                unassign = (
+                    call,
+                    self.note("UNASSIGNMENT_COMPLETED", run_id, test_id, **ids),
+                )
+                break
+            log.warning(
+                "%s %s: unassignment not confirmed: %s %s",
+                run_id,
+                request_id,
+                status,
+                str(reply)[:2000],
+            )
+            if not firm_refusal(reply):
+                # A timeout or server error: the ledger may still unassign it,
+                # so the request is not withdrawn. Followed like a lost answer
+                # (as B1 submit does): a resend goes on from the state.
+                return 503, self.unknown_of(key, command, resumed)
+            found = await self.prepared_run(
+                run_id, Trail(run_id, test_id, fields, "recheck")
+            )
+        if not reassignment:
+            log.warning(
+                "%s %s: %s is in a reassignment the ledger does not name",
+                run_id,
+                request_id,
+                cid,
+            )
+            return 503, self.unknown_of(key, command, resumed)
+        ids = dict(moved, contract_id=cid, reassignment_id=reassignment)
+        self.note("ASSIGNMENT_STARTED", run_id, test_id, **ids)
+        call = self.reassignment_call(
+            key,
+            "ASSIGN",
+            cid,
+            {
+                "reassignmentId": reassignment,
+                "source": self.synchronizers[source],
+                "target": self.synchronizers[target],
+            },
+        )
+        try:
+            status, reply = await self.send_call(run_id, test_id, fields, call)
+        except (MessageNotLogged, LedgerUnreachable) as error:
+            # Unassigned and not assigned: resending the request assigns it.
+            log.warning("%s %s: assignment not confirmed: %s", run_id, request_id, error)
+            return 503, self.unknown_of(key, command, resumed)
+        event = self.reassignment_event(status, reply, "JsAssignmentEvent")
+        if event is None or (event.get("createdEvent") or {}).get("contractId") != cid:
+            log.warning(
+                "%s %s: assignment not confirmed: %s %s",
+                run_id,
+                request_id,
+                status,
+                str(reply)[:2000],
+            )
+            # An earlier attempt may have assigned it (the ledger refuses an
+            # assignment already completed).
+            found = await self.prepared_run(
+                run_id, Trail(run_id, test_id, fields, "recheck")
+            )
+            contract = self.whereabouts(found, key, cid)
+            if contract is not None and contract.synchronizer == target:
+                return self.reassigned(key, command, record, cid, replayed=resumed)
+            return 503, self.unknown_of(key, command, resumed)
+        assigned = self.note("ASSIGNMENT_COMPLETED", run_id, test_id, **ids)
+        version = int(command["expected_version"])
+        self.note(
+            "INTERNAL_COMMITTED",
+            run_id,
+            test_id,
+            outcome="COMMITTED",
+            contract_id=cid,
+            record_id=request_id,
+            version_before=version,
+            version_after=version,
+            **fields,
+        )
+        if await self.usable(Trail(run_id, test_id, fields, "usable-check"), cid, target):
+            self.note("TARGET_USABLE", run_id, test_id, **ids)
+        try:
+            self.record_reassignment(run_id, cid, unassign, (call, assigned))
+        except Exception:
+            # Committed whatever happens to its evidence: a problem writing the
+            # manifest leaves the references out, it does not change the answer.
+            log.exception("%s %s: reassignment evidence not recorded", run_id, request_id)
+        return self.reassigned(key, command, record, cid, replayed=resumed)
+
+    def reassigned(
+        self,
+        key: tuple[str, str, str],
+        command: dict,
+        record: dict,
+        cid: str,
+        replayed: bool,
+    ) -> tuple[int, dict]:
+        """Keep the committed reassignment, naming the contract it moved (so
+        whereabouts tells another request of the run that it did not), then
+        answer it. A failure to keep it is answered INTERNAL_ERROR (process):
+        the request stays STARTED and a resend finds the contract on the
+        target."""
+        version = int(command["expected_version"])
+        payload = command["payload"]
+        record = dict(
+            record,
+            outcome="COMMITTED",
+            contract_id=cid,
+            effect={
+                "bundle_id": command["bundle_id"],
+                "version_before": version,
+                "version_after": version,
+                "record_type": "REASSIGNMENT",
+                "record_id": key[2],
+                "source_synchronizer": payload["source_synchronizer"],
+                "target_synchronizer": payload["target_synchronizer"],
+            },
+        )
+        self.keep(key, record)
+        log.info("%s %s %s committed", key[0], command["command_type"], key[2])
+        return 200, self.kept_answer(record, replayed)
+
+    def reassignment_call(
+        self, key: tuple[str, str, str], operation: str, cid: str, value: dict
+    ) -> Call:
+        """The Ledger API body of an unassign or assign call, submitted by the
+        request's actor. Each call has its own command id: a resend is
+        decided from the state, not deduplicated by the ledger."""
+        call = Call(operation, cid)
+        party = self.parties[key[1]]
+        command = "UnassignCommand" if operation == "UNASSIGN" else "AssignCommand"
+        body = {
+            "reassignmentCommands": {
+                "submitter": party,
+                "commandId": f"{self.platform}-{call.stem.replace(':', '-')}",
+                "userId": f"adapter-{self.platform}",
+                "commands": [{"command": {command: {"value": value}}}],
+            },
+            "eventFormat": {"filtersByParty": {party: {}}},
+        }
+        call.request = json.dumps(body, separators=(",", ":")).encode()
+        return call
+
+    async def send_call(
+        self, run_id: str, test_id: str, fields: dict, call: Call
+    ) -> tuple[int, object]:
+        """Send an unassign or assign call and keep its raw request and
+        response next to the run's events. The request file is written before
+        the call, so a call whose answer is lost keeps it. The MESSAGE_SENT is
+        required (Message.sent): the api_calls evidence names it."""
+        root = self.events.root / run_id
+        self.save(root / call.file("request"), call.request)
+        status, raw = await self.ledger_raw(
+            "POST",
+            REASSIGN_PATH,
+            Message(
+                Trail(run_id, test_id, fields, call.operation.lower()),
+                call.stem,
+                call.sent,
+            ),
+            data=call.request,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            self.save(root / call.file("response"), raw)
+        except OSError:
+            # The ledger answered: a response that cannot be kept leaves its
+            # evidence out (record_reassignment), not the answer.
+            log.exception("%s %s: response not kept", run_id, call.stem)
+        try:
+            return status, json.loads(raw) if raw else {}
+        except ValueError:
+            return status, raw[:500].decode(errors="replace")
+
+    @staticmethod
+    def reassignment_event(status: int, reply, kind: str) -> dict | None:
+        """The unassigned (JsUnassignedEvent) or assigned (JsAssignmentEvent)
+        event of a successful submit-and-wait-for-reassignment reply."""
+        if status != 200 or not isinstance(reply, dict):
+            return None
+        reassignment = reply.get("reassignment")
+        if not isinstance(reassignment, dict):
+            return None
+        for event in reassignment.get("events") or []:
+            value = event.get(kind) if isinstance(event, dict) else None
+            if isinstance(value, dict):
+                value = value.get("value", value)
+                if isinstance(value, dict):
+                    return value
+        return None
+
+    async def usable(self, trail: Trail, cid: str, target: str) -> bool:
+        """Whether this participant's active contracts show the contract
+        assigned to the target (measurement.md §9 t_usable_S2): P_X hosts
+        BANK_B, the right's holder, on S2. False when it is not seen within
+        USABLE_WAIT; the reassignment is committed either way."""
+        deadline = time.monotonic() + USABLE_WAIT
+        while True:
+            try:
+                found = await self.active_contracts(trail.run_id, trail)
+            except LedgerUnreachable as error:
+                log.warning("TARGET_USABLE not checked: %s", error)
+                return False
+            if any(
+                c.cid == cid and not c.incomplete and c.synchronizer == target
+                for c in found[RIGHT]
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                log.warning("TARGET_USABLE: %s not seen on %s", cid, target)
+                return False
+            await asyncio.sleep(LOCAL_POLL)
+
+    def note(
+        self, event_type: str, run_id: str, test_id: str, stamp=None, **fields
+    ) -> str | None:
+        """Log a reassignment event. The ledger has acted whatever happens to
+        the event: a problem logging it leaves it out (None), it does not
+        stop the reassignment."""
+        try:
+            return self.events.write(event_type, run_id, test_id, stamp, **fields)
+        except Exception:
+            log.exception("%s of %s not logged", event_type, fields.get("request_id"))
+            return None
+
+    @staticmethod
+    def save(path: Path, data: bytes) -> None:
+        """Write a file whole: aside, synced, then renamed."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pending = path.with_name(path.name + ".tmp")
+        with open(pending, "wb") as file:
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        pending.replace(path)
+
+    def selection_path(self, run_id: str) -> Path:
+        return self.events.root / run_id / "contracts.json"
+
+    def ensure_selection(self, run_id: str, cid: str, right_id: str) -> None:
+        """B2 X (README §3 B2): declare the contracts Y needs moved to S2
+        (contracts.json, which the common runner reads before it submits
+        REASSIGN_FOR_LENDING): the right Y's ConfirmLoan uses, created on S1
+        by X's CONFIRM_REPO. It is the only one: the loan agreement is created
+        on S2 when the run is prepared (selftest/b2_selftest.py for now: the
+        common loader, prepare.py, prepares b1-xyz runs only). Written once per
+        run, when CONFIRM_REPO commits (log_commit) or else when the
+        reassignment starts."""
+        path = self.selection_path(run_id)
+        if path.exists():
+            return
+        manifest = {
+            "run_id": run_id,
+            "synchronizers": {
+                name: self.synchronizers[name] for name in ("S1", "S2")
+            },
+            "required_contracts": [
+                {
+                    "contract_id": cid,
+                    "reason": (
+                        "input of Y's ConfirmLoan: the right BANK_B holds after "
+                        "X's CONFIRM_REPO, created on S1; the loan agreement is "
+                        "created on S2 at preparation"
+                    ),
+                    "business_refs": [right_id],
+                    "dependencies": [],
+                }
+            ],
+            "api_calls": [],
+        }
+        self.save(path, (json.dumps(manifest, indent=2) + "\n").encode())
+
+    def record_reassignment(
+        self,
+        run_id: str,
+        cid: str,
+        unassign: tuple[Call, str | None] | None,
+        assign: tuple[Call, str | None],
+    ) -> None:
+        """Add a committed reassignment's calls and raw evidence to
+        contracts.json, leaving the selection as it was. A step this process
+        did not see, or whose event was not logged, adds no reference."""
+        path = self.selection_path(run_id)
+        manifest = json.loads(path.read_text())
+        root = self.events.root / run_id
+        contract = next(
+            (c for c in manifest["required_contracts"] if c["contract_id"] == cid),
+            None,
+        )
+        if contract is None:
+            raise ValueError(f"{cid} is not among the declared contracts")
+        for step, name in ((unassign, "unassigned_evidence"), (assign, "assigned_evidence")):
+            if step is None or step[1] is None:
+                continue
+            call, completed = step
+            response = call.file("response")
+            contract[name] = {
+                "event_id": completed,
+                "path": response,
+                "sha256": hashlib.sha256((root / response).read_bytes()).hexdigest(),
+            }
+        for step in (unassign, assign):
+            if step is None or not step[0].sent:
+                continue
+            call = step[0]
+            request = call.file("request")
+            manifest["api_calls"].append(
+                {
+                    "call_id": call.call_id,
+                    "operation": call.operation,
+                    "contract_ids": [call.contract_id],
+                    "retry_of": call.retry_of,
+                    "evidence": {
+                        "path": request,
+                        "sha256": hashlib.sha256((root / request).read_bytes()).hexdigest(),
+                        "event_id": call.sent[0],
+                    },
+                }
+            )
+        self.save(path, (json.dumps(manifest, indent=2) + "\n").encode())
+
+    # --- requests ---------------------------------------------------------
 
     async def answer(
         self, key: tuple[str, str, str], command: dict, test_id: str, fields: dict
@@ -1472,26 +2279,34 @@ class Adapter:
         self, key: tuple[str, str, str], command: dict, test_id: str, fields: dict
     ) -> tuple[int, dict]:
         """The request's existing record comes before the state check
-        (interface §6.3): a rejection kept on disk, the trade contract a
-        commit created, or a submission whose answer was lost."""
+        (interface §6.3): a request kept on disk (a rejection, or on B2 X a
+        reassignment), the trade contract a commit created, or a submission
+        whose answer was lost. A reassignment kept as STARTED goes on from
+        where the state shows its contract (README §3 B2)."""
         run_id, role, request_id = key
         kind = command["command_type"]
         content = canonical(command)
-        rejection = self.rejections_of(run_id).get((role, request_id))
-        if rejection is not None:
-            if rejection["content"] != content:
+        kept = self.kept_of(run_id).get((role, request_id))
+        if kept is not None:
+            if kept["content"] != content:
                 raise self.conflict(request_id)
-            return 200, self.rejected_of(rejection, replayed=True)
+            if kept.get("outcome") != "STARTED":
+                return 200, self.kept_answer(kept, replayed=True)
         found = await self.prepared_run(run_id, Trail(run_id, test_id, fields, "state"))
         record = self.record_of(found, role, request_id)
         if record is not None:
             if not record_matches(record, command):
                 raise self.conflict(request_id)
             return 200, self.result_of(run_id, record, replayed=True)
+        if kept is not None:
+            return await self.reassign(
+                key, command, found, kept["contract_id"], test_id, fields, resumed=True
+            )
         earlier = self.unknown.get(key)
         if earlier is not None and canonical(earlier) != content:
             raise self.conflict(request_id)
-        verdict = self.judge(found, command, role)
+        judge = self.judge_reassign if kind == REASSIGN else self.judge
+        verdict = judge(found, command, role)
         if verdict.absent:
             # The participant may not have applied the preceding trade yet.
             reads, deadline = 1, time.monotonic() + ABSENT_WAIT
@@ -1506,7 +2321,7 @@ class Adapter:
                     if not record_matches(record, command):
                         raise self.conflict(request_id)
                     return 200, self.result_of(run_id, record, replayed=True)
-                verdict = self.judge(found, command, role)
+                verdict = judge(found, command, role)
             log.info(
                 "%s %s %s: no right of the bundle on the first read; after %d reads: %s",
                 run_id,
@@ -1517,6 +2332,10 @@ class Adapter:
             )
         if verdict.code is not None:
             return self.reject(key, command, verdict.code, verdict.message)
+        if kind == REASSIGN:
+            return await self.reassign(
+                key, command, found, verdict.right.cid, test_id, fields, resumed=False
+            )
         return await self.submit(
             key, command, verdict, test_id, fields, earlier is not None
         )
@@ -1547,6 +2366,9 @@ class Adapter:
                 "commandId": self.command_id(key),
                 "userId": f"adapter-{self.platform}",
                 "actAs": [self.parties[key[1]]],
+                # B2: on the platform's own synchronizer, where judge found
+                # every input (README §3 B2).
+                **({"synchronizerId": self.synchronizer} if self.b2 else {}),
             },
             "transactionFormat": {
                 "eventFormat": self.party_filter(),
@@ -1885,6 +2707,16 @@ class Adapter:
                 **self.right_event(successor),
                 **fields,
             )
+            if self.b2 and REASSIGN in self.commands:
+                # B2 X: the right Y uses is now on S1 (README §3 B2).
+                try:
+                    self.ensure_selection(
+                        run_id,
+                        successor["contractId"],
+                        successor["createArgument"]["rightId"],
+                    )
+                except Exception:
+                    log.exception("%s: reassignment selection not written", run_id)
             if await self.locally_applied(
                 Trail(run_id, test_id, fields, "local-check"), successor["contractId"]
             ):
@@ -2018,9 +2850,22 @@ class Adapter:
         for _ in range(2):
             work = self.tasks.get(key)
             busy = work is not None and not work.task.done()
-            rejection = self.rejections_of(run_id).get((role, request_id))
-            if rejection is not None:
-                return web.json_response(self.rejected_of(rejection, replayed=False))
+            kept = self.kept_of(run_id).get((role, request_id))
+            if kept is not None and kept.get("outcome") != "STARTED":
+                return web.json_response(self.kept_answer(kept, replayed=False))
+            if kept is not None:
+                # A reassignment started and not decided: still going on, or
+                # its outcome is unknown until it is resent (README §3 B2).
+                # Nothing awaited since busy was read, so a task that ended
+                # has already kept its decision.
+                command = json.loads(kept["content"])
+                if busy:
+                    return web.json_response(
+                        self.pending_of(key, command, replayed=False), status=202
+                    )
+                return web.json_response(
+                    self.unknown_of(key, command, replayed=False), status=503
+                )
             found = await self.prepared_run(run_id, trail)
             record = self.record_of(found, role, request_id)
             if record is not None:
@@ -2108,7 +2953,7 @@ class Adapter:
         CONFIRM_LOAN): the blocking reasons and the submitter's available
         rights of the bundle."""
         agreements = [
-            c.arg
+            c
             for c in found[CONFIRMATIONS[kind].agreement]
             if c.arg["agreementId"] == agreement_id and c.arg["bundleId"] == bundle_id
         ]
@@ -2121,27 +2966,30 @@ class Adapter:
             )
         if len(agreements) > 1:
             raise preparation_conflict("more than one pre-agreement for the bundle")
+        if self.away(agreements[0]):
+            raise preparation_conflict(f"the pre-agreement is not on {self.home}")
         reasons = []
-        collateral = agreements[0]["collateral"]
+        collateral = agreements[0].arg["collateral"]
         if not (collateral["provided"] and collateral["conditionsMet"]):
             reasons.append("PRECONDITION_NOT_MET")  # acceptance.md AC-04
         held = [
-            c.arg
+            c
             for c in found[RIGHT]
             if c.arg["bundle"]["bundleId"] == bundle_id
             and c.arg["holder"] == self.parties[role]
         ]
-        available = [a for a in held if a["status"] == "AVAILABLE"]
+        available = [c for c in held if c.arg["status"] == "AVAILABLE"]
         if len(available) > 1:
             raise preparation_conflict(f"{role} holds more than one available right")
         if not held:
             # The preceding trade has not given the submitter a right yet.
             reasons.append("PRECONDITION_NOT_MET")
-        elif not available:
+        elif not available or self.away(available[0]):
+            # B2: a right not (yet) on this synchronizer cannot be used here.
             reasons.append("RIGHT_UNAVAILABLE")
-        elif kind not in available[0]["allowedCommands"]:
+        elif kind not in available[0].arg["allowedCommands"]:
             reasons.append("USE_NOT_PERMITTED")
-        return reasons, available
+        return reasons, [c.arg for c in available]
 
     def margin_readiness(
         self,
@@ -2154,7 +3002,7 @@ class Adapter:
         for, in its order; VERSION_CONFLICT needs an expected version and is
         not a readiness reason (readiness.schema)."""
         calls = [
-            c.arg
+            c
             for c in found[MARGIN_CALL]
             if c.arg["marginCallId"] == margin_call_id and c.arg["bundleId"] == bundle_id
         ]
@@ -2167,8 +3015,11 @@ class Adapter:
             )
         if len(calls) > 1:
             raise preparation_conflict("more than one margin call for the bundle")
-        call, user = calls[0], self.parties[role]
-        rights = [c.arg for c in found[RIGHT] if c.arg["bundle"]["bundleId"] == bundle_id]
+        if self.away(calls[0]):
+            raise preparation_conflict(f"the margin call is not on {self.home}")
+        call, user = calls[0].arg, self.parties[role]
+        located = [c for c in found[RIGHT] if c.arg["bundle"]["bundleId"] == bundle_id]
+        rights = [c.arg for c in located]
         reasons = []
         if not rights:
             reasons.append("PRECONDITION_NOT_MET")  # the loan has not reached Z
@@ -2178,13 +3029,15 @@ class Adapter:
             reasons.append("PRECONDITION_NOT_MET")
         if not (call["wholeBundleAccepted"] and call["eligibilityPassed"]):
             reasons.append("COLLATERAL_NOT_ELIGIBLE")
-        held = [a for a in rights if a["holder"] == user]
-        available = [a for a in held if a["status"] == "AVAILABLE"]
+        held = [c for c in located if c.arg["holder"] == user]
+        usable = [c for c in held if c.arg["status"] == "AVAILABLE"]
+        available = [c.arg for c in usable]
         if len(available) > 1:
             raise preparation_conflict(f"{role} holds more than one available right")
         if not held:
             reasons.append("PRECONDITION_NOT_MET")
-        elif not available:
+        elif not available or self.away(usable[0]):
+            # B2: a right not (yet) on this synchronizer cannot be used here.
             reasons.append("RIGHT_UNAVAILABLE")
         else:
             right = available[0]
