@@ -30,6 +30,13 @@ def history_fixture():
 
 
 class HistoryTests(unittest.TestCase):
+    def test_malformed_command_result_pairs_are_evidence_errors(self):
+        command, result, _ = history_fixture()
+        for commands in (None, [None], [[command]], [[command, result, result]],
+                         [[command, None]], [[None, result]], [[command, {}]], [[{}, result]]):
+            with self.subTest(commands=commands), self.assertRaises(CheckError):
+                history_check([], commands)
+
     def test_valid_transition_and_missing_internal_evidence(self):
         command, result, rows = history_fixture()
         history_check(rows, [(command, result)])
@@ -96,11 +103,11 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(final_gate("A", [row], [case], batch))
 
     def test_final_gate_empty_history_matches_collection_rules(self):
-        _, _, events = history_fixture()
+        command, _, events = history_fixture()
         for test_id, accepted, allowed in (("AC-02", [], True), ("AC-03", [], True),
                                            ("AC-01", [], False), ("AC-02", [[{}, {}]], False),
                                            ("AC-02", "missing", False), ("AC-03", None, False),
-                                           ("AC-02", {}, False)):
+                                           ("AC-02", {}, False), ("AC-02", [[command, None]], False)):
             with self.subTest(test_id=test_id, accepted=accepted), tempfile.TemporaryDirectory() as temp:
                 batch = Path(temp)
                 path = batch / "run"
