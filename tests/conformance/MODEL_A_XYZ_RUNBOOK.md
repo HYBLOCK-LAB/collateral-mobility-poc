@@ -1,8 +1,8 @@
 # Model A Z 공통 연결
 
 대상은 Draft [PR #8](https://github.com/HYBLOCK-LAB/collateral-mobility-poc/pull/8)의
-`b2bd66d63e9d8274a769ce7274612ac478e5a68e`와 총괄의 Z 적재·수집 연결 코드다.
-최소 정상 흐름의 개발 중 연결이며 최종 인계·병합 승인·본 실험 시작을 의미하지 않는다.
+`8889d866dcd1cf920fb416dbe87d1e0e6fe3a026`와 PR #10의 Z 적재·수집 연결 코드다.
+아래 절차는 Model A의 XYZ 최종 기능 검증에 적용한다.
 기존 X→Y 기준은 `83a4b5da61db49a72711694980c1ff03d175a7ae`와
 [보존 기록](baselines/model-a-xy-20261122.md)을 유지한다.
 
@@ -14,6 +14,9 @@
   재사용하지 않는다. 기존 데이터를 삭제하거나 `down -v`로 초기화하지 않는다.
 - Compose는 구현 README의 `compose.yaml`과 `compose.z.yaml`을 함께 사용한다.
   DB는 각각 PostgreSQL 17의 `model_a_x`, `model_a_y`, `model_a_z`다.
+- 단일 Z API 프로세스를 준비부터 수집까지 유지한다. Z에
+  `MODEL_A_READINESS_EVIDENCE_TOKEN_FILE`을 설정하고, 준비·수집 래퍼에도 동일한
+  비밀 파일을 읽기 전용으로 제공한다. Compose에서는 Z와 두 작업 컨테이너에만 마운트한다.
 - API의 네 가지 `POC_*_TOKEN`을 실행기 환경에도 설정한다. 내부 XY·YZ 토큰은
   API 간 통신용이며 실행기·수집기에 전달하지 않는다.
 - 초기 적재 자격은 `MODEL_A_X_SEED_DSN`, `MODEL_A_Y_SEED_DSN`,
@@ -30,7 +33,9 @@ DSN은 프로그램 실행 위치에서 실제 접근 가능한 주소여야 한
 호스트에 공개되지 않는다. 전용 DB 네트워크 안에서 연결 프로그램을 실행한다면
 Python·공통 모듈·Schema·fixture의 읽기 경로와 결과 쓰기 경로를 준비하고,
 아래 준비/수집 argv를 해당 컨테이너의 `docker exec ... python ...`으로 바꾼다.
-적재 컨테이너와 읽기 전용 수집 컨테이너의 자격은 분리한다.
+적재 컨테이너와 읽기 전용 수집 컨테이너의 자격은 분리한다. 두 컨테이너는
+`yz` 네트워크에서 `http://api-z:8000`을 Z 제어 주소로 사용한다. 설정의 공개 API
+주소는 공통 실행기가 실제 접속하는 주소로 유지한다.
 
 ## 2. 준비와 실행
 
@@ -40,8 +45,10 @@ Python·공통 모듈·Schema·fixture의 읽기 경로와 결과 쓰기 경로�
 cp -n tests/conformance/config.a.xyz.example.json tests/conformance/config.a.xyz.local.json
 ```
 
-실제 API 주소·Python 경로·`evidence_dir`를 확인한다. Python에는 기존 의존성과
-`psycopg[binary]==3.3.3`이 필요하다. 준비 명령의 마지막 `xyz`가 Z 적재를 선택한다.
+실제 API 주소·Python 경로·`evidence_dir`를 확인한다. 준비 명령에 있는 Z 제어 주소와
+토큰 파일 경로를 실제 값으로 바꾼다. 아래 예시는 로컬에서 두 보조 명령을 실행하는
+경우이며, 컨테이너에서는 보조 명령의 접속 주소와 마운트 경로를 사용한다.
+보조 명령의 Python에는 Model A requirements와 공통 실행기 의존성이 필요하다. 준비 명령의 마지막 `xyz`가 Z 적재를 선택한다.
 수집 명령에도 같은 위치 인자 `xyz`를 붙인다. 위치 인자를 사용하므로 실행기의
 `--collect-command` argv와 옵션 구분이 충돌하지 않는다.
 
@@ -53,19 +60,26 @@ cp -n tests/conformance/config.a.xyz.example.json tests/conformance/config.a.xyz
 .venv/bin/python tests/conformance/runner.py check \
   --config tests/conformance/config.a.xyz.local.json --observer-auth bearer \
   --stage xyz --case AC-01 AC-02 \
-  --collect-command .venv/bin/python implementations/db-api/collect_events.py xyz
+  --collect-command .venv/bin/python implementations/db-api/readiness_evidence.py collect \
+    http://127.0.0.1:8103 /run/secrets/model_a_readiness_evidence \
+    implementations/db-api/collect_events.py xyz
 
 .venv/bin/python tests/conformance/runner.py check \
   --config tests/conformance/config.a.xyz.local.json --observer-auth bearer \
-  --stage xyz \
-  --collect-command .venv/bin/python implementations/db-api/collect_events.py xyz
+  --stage xyz --final \
+  --collect-command .venv/bin/python implementations/db-api/readiness_evidence.py collect \
+    http://127.0.0.1:8103 /run/secrets/model_a_readiness_evidence \
+    implementations/db-api/collect_events.py xyz
 ```
 
 적재는 모든 선택 DB의 run_id를 먼저 확인하고, Z에는 버전 0의 묶음과 fixture의
 OPEN 증거금 요구·수용·적격성 조건만 넣는다. 후속 권리·배정·확정 거래를 주입하지 않는다.
 일부 DB만 적재된 실패 실행은 보존하고 새 run_id를 사용한다.
 수집 파일은 `<evidence_dir>/<run_id>/events.jsonl`이며 실패한 업무 실행의 진단용
-이벤트도 남긴다. 미확정 작업이 남으면 수집 성공으로 처리하지 않는다.
+이벤트도 남긴다. readiness 증거의 커밋·완전성을 확인한 뒤에만 최종 JSONL이 게시된다.
+`events.readiness-*.json`과 해당 JSONL도 실행별로 보존한다. 수집을 시작한 run_id는
+재사용하지 않는다. 최종 실행 전에 실제 환경·구현 해시·보존 기준·Z 변경 근거를
+`context.json`에 기록한다.
 
 ## 3. X→Y 회귀와 완료 구분
 
@@ -82,7 +96,7 @@ XYZ 설정을 그대로 쓰며 실행기만 `--stage xy`로 바꾸면 적재는 
 추정하지 않으므로 해당 명령 자체에서 단계 일치를 보장해야 한다.
 
 공통 검증과 별도로 수인님의 자체 58건 전체 회귀, Z 거절·경합·재시작 검증과
-원본 증거를 확인해야 한다. Z readiness의 내부 Y 조회 메시지 계측도 아직 별도 확인 대상이다.
+원본 증거를 확인해야 한다. Z readiness의 내부 Y 조회 메시지와 저장 완료 증빙은 원본 JSONL과 함께 확인한다.
 최종 인계에는 모든 필수 공통 항목과 실제 `context.json`의 버전·환경·기준 커밋·Z 변경 기록이
 필요하다. 일부 정상 흐름 PASS나 필터 실행의 종료 코드 0으로 전체 완료를 선언하지 않는다.
 

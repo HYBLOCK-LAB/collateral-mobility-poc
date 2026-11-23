@@ -17,7 +17,7 @@ PGDATA="$CANTON_STATE_DIR/postgres"
 SECRETS="$CANTON_STATE_DIR/secrets"
 LOGDIR="$CANTON_STATE_DIR/logs"
 # One database per node (sequencer driver separate, as in Canton's HA example).
-NODE_DBS=(canton_s1_sequencer canton_s1_sequencer_driver canton_s1_mediator canton_px canton_py)
+NODE_DBS=(canton_s1_sequencer canton_s1_sequencer_driver canton_s1_mediator canton_px canton_py canton_pz)
 
 die() { echo "db.sh: $*" >&2; exit 1; }
 

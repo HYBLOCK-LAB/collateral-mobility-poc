@@ -38,6 +38,16 @@ class CantonConnectionTests(unittest.TestCase):
         self.creates = []
         self.fail_y = False
         self.exists = False
+        self.existing_z = False
+        self.fail_z = False
+
+    def xyz_state(self):
+        ids = json.loads((self.state / "ids.json").read_text())
+        ids.update(topology="b1-xyz")
+        ids["parties"]["CCP"] = "ccp::test"
+        ids["json_api"]["P_Z"] = "http://127.0.0.1:4533"
+        (self.state / "ids.json").write_text(json.dumps(ids))
+        return ids
 
     def ledger(self, request):
         body = json.loads(request.content)
@@ -45,7 +55,7 @@ class CantonConnectionTests(unittest.TestCase):
             self.assertEqual(body["maxPageSize"], 200)
             rows = [{"contractEntry": {"JsActiveContract": {"createdEvent": {
                 "packageName": "collateral", "createArgument": {"runId": "run-test"}
-            }}}}] if self.exists else []
+            }}}}] if self.exists or (self.existing_z and request.url.port == 4533) else []
             return httpx.Response(200, json={"activeContracts": rows})
         for command in body["commands"]["commands"]:
             create = command["CreateCommand"]
@@ -54,6 +64,8 @@ class CantonConnectionTests(unittest.TestCase):
         self.creates.append((request.url.port, body["commands"]))
         if self.fail_y and request.url.port == 4523:
             raise httpx.ReadTimeout("uncertain submission", request=request)
+        if self.fail_z and request.url.port == 4533:
+            raise httpx.ReadTimeout("uncertain Z submission", request=request)
         return httpx.Response(200, json={"transaction": {"offset": 10}})
 
     def test_success_only_creates_s0_on_expected_participants(self):
@@ -130,3 +142,70 @@ class CantonConnectionTests(unittest.TestCase):
             with self.assertRaises(CheckError):
                 loader.prepare("run-test", self.fixture, self.state, client)
         self.assertEqual(self.creates, [])
+
+    def test_xyz_creates_margin_calls_with_both_signers_and_no_business_choices(self):
+        ids = self.xyz_state()
+        self.fixture = read_json(ROOT / "shared/fixtures/initial/two-margin-calls.json")
+        with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
+            loader.prepare("run-test", self.fixture, self.state, client, "xyz")
+        self.assertEqual([port for port, _ in self.creates], [4513, 4523, 4533])
+        z = self.creates[-1][1]
+        self.assertEqual(z["actAs"], [PARTIES["BANK_C"], ids["parties"]["CCP"]])
+        self.assertEqual(len(z["commands"]), 2)
+        for command, margin in zip(z["commands"], self.fixture["margin_calls"]):
+            self.assertEqual(set(command), {"CreateCommand"})
+            created = command["CreateCommand"]
+            self.assertEqual(created["templateId"], "#collateral:Collateral.Margin:MarginCall")
+            self.assertEqual(created["createArguments"]["marginCallId"], margin["margin_call_id"])
+            self.assertEqual(created["createArguments"]["status"], "OPEN")
+        self.assertEqual((self.evidence / "run-test/events.jsonl").read_bytes(), b"")
+
+    def test_default_xy_does_not_seed_z_on_xyz_topology(self):
+        self.xyz_state()
+        with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
+            loader.prepare("run-test", self.fixture, self.state, client)
+        self.assertEqual([port for port, _ in self.creates], [4513, 4523])
+
+    def test_xyz_fixture_conditions_are_preserved_without_mutating_input(self):
+        parties = self.xyz_state()["parties"]
+        for path in (ROOT / "shared/fixtures/initial").glob("*.json"):
+            fixture = read_json(path)
+            original = copy.deepcopy(fixture)
+            mapped = loader.commands("run-test", fixture, parties, "xyz")
+            self.assertEqual(fixture, original)
+            for create, margin in zip(mapped["P_Z"], fixture["margin_calls"], strict=True):
+                self.assertEqual(create["CreateCommand"]["createArguments"], {
+                    "runId": "run-test", "marginCallId": margin["margin_call_id"],
+                    "bundleId": margin["bundle_id"], "provider": parties[margin["provider"]],
+                    "ccp": parties[margin["ccp"]], "wholeBundleAccepted": margin["whole_bundle_accepted"],
+                    "eligibilityPassed": margin["eligibility_passed"], "status": margin["status"],
+                })
+
+    def test_xyz_rejects_xy_topology_before_submitting_or_claiming(self):
+        with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
+            with self.assertRaisesRegex(CheckError, "b1-xyz"):
+                loader.prepare("run-test", self.fixture, self.state, client, "xyz")
+        self.assertEqual(self.creates, [])
+        self.assertFalse((self.state / "conformance-preparations").exists())
+
+    def test_z_existing_run_is_checked_before_any_participant_submits(self):
+        self.xyz_state()
+        self.existing_z = True
+        with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
+            with self.assertRaisesRegex(CheckError, "RUN_ALREADY_EXISTS"):
+                loader.prepare("run-test", self.fixture, self.state, client, "xyz")
+        self.assertEqual(self.creates, [])
+        self.assertFalse((self.state / "conformance-preparations").exists())
+
+    def test_uncertain_z_submission_keeps_claim_without_initializing_success_log(self):
+        self.xyz_state()
+        self.fail_z = True
+        with httpx.Client(transport=httpx.MockTransport(self.ledger)) as client:
+            with self.assertRaises(httpx.ReadTimeout):
+                loader.prepare("run-test", self.fixture, self.state, client, "xyz")
+            self.assertTrue((self.state / "conformance-preparations/run-test.json").exists())
+            self.assertFalse((self.evidence / "run-test/events.jsonl").exists())
+            self.fail_z = False
+            with self.assertRaisesRegex(CheckError, "RUN_ALREADY_EXISTS"):
+                loader.prepare("run-test", self.fixture, self.state, client, "xyz")
+        self.assertEqual(len(self.creates), 3)

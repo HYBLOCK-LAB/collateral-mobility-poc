@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canton process for B1 (stages 1-3: S1, P_X, P_Y).
+# Canton process for B1 (S1, P_X, P_Y, P_Z; topology b1-xyz).
 #
 #   canton.sh start     start the daemon and wait until bootstrap finished
 #   canton.sh stop      stop the daemon (SIGTERM, then wait)
@@ -7,7 +7,9 @@
 #   canton.sh ready     exit 0 only if the daemon runs and its bootstrap finished
 #
 # Requires the PostgreSQL cluster (scripts/db.sh start). Node logs go to
-# $CANTON_STATE_DIR/logs/canton.log, stdout/stderr to canton.out.
+# $CANTON_STATE_DIR/logs/canton.log, stdout/stderr to canton.out. A state
+# directory bootstrapped with another topology (ids.json, e.g. the stage-2
+# "b1-xy" ledger) is refused: start it from the commit that created it.
 set -euo pipefail
 . "$(cd "$(dirname "$0")" && pwd)/env.sh"
 
@@ -15,6 +17,7 @@ CONF="$CANTON_IMPL_DIR/canton/b1-xy.conf"
 BOOT="$CANTON_IMPL_DIR/canton/bootstrap-b1-xy.canton"
 PIDFILE="$CANTON_STATE_DIR/canton.pid"
 READY="$CANTON_STATE_DIR/canton.ready"
+TOPOLOGY="b1-xyz"
 LOGDIR="$CANTON_STATE_DIR/logs"
 START_TIMEOUT="${CANTON_START_TIMEOUT:-300}"
 
@@ -33,6 +36,10 @@ cmd_start() {
   if pid="$(running_pid)"; then echo "canton.sh: already running (pid $pid)"; return; fi
   [ -x "$CANTON_HOME/bin/canton" ] || die "Canton $CANTON_VERSION not found at $CANTON_HOME (scripts/install-toolchain.sh)"
   [ -n "${CANTON_PG_PASSWORD:-}" ] || die "CANTON_PG_PASSWORD not set (scripts/db.sh init)"
+  if [ -f "$CANTON_STATE_DIR/ids.json" ] &&
+    ! grep -q "\"topology\": \"$TOPOLOGY\"" "$CANTON_STATE_DIR/ids.json"; then
+    die "$CANTON_STATE_DIR was bootstrapped with another topology than $TOPOLOGY (ids.json); use a new state directory (README §4)"
+  fi
   "$CANTON_PG_BIN/pg_isready" -q -h "$CANTON_PG_HOST" -p "$CANTON_PG_PORT" || die "PostgreSQL not running (scripts/db.sh start)"
   mkdir -p "$LOGDIR"
   rm -f "$READY"
@@ -98,5 +105,5 @@ case "${1:-}" in
   stop) cmd_stop ;;
   status) cmd_status ;;
   ready) cmd_ready ;;
-  *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

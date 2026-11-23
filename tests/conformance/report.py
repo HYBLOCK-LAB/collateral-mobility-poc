@@ -282,8 +282,10 @@ def report_batch(batch):
             if event["event_type"] in ("MESSAGE_SENT", "MESSAGE_RECEIVED"):
                 grouped[event["message_category"], event["message_kind"]].add(event["message_id"])
         for (category, kind), messages in sorted(grouped.items()):
+            # Observer HTTP calls and implementation calls made for them are separate hops.
+            label = "HARNESS/IMPLEMENTATION" if category == "HARNESS" else category
             complexity.append(dict(model=row["model"], run_id=row["run_id"], metric="N_message",
-                                   kind=category+"/"+kind, value=len(messages), status="OBSERVED",
+                                   kind=label+"/"+kind, value=len(messages), status="OBSERVED",
                                    evidence_ref=str(wrapper.relative_to(batch)),
                                    note="Send/receive duplicates collapsed; categories kept separate"))
     for model in {r["model"] for r in complexity}:

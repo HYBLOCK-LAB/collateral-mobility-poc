@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 1 checks against the running b1-xy Canton (scripts/canton.sh start).
+"""Stage 1 checks against the running Canton (scripts/canton.sh start).
 
 What it checks, through the JSON Ledger API of P_X and P_Y only:
   visibility   which party sees which contract on which participant
@@ -7,6 +7,9 @@ What it checks, through the JSON Ledger API of P_X and P_Y only:
   contention   one consuming choice submitted at the same time from P_X and P_Y
   propagation  time from a commit on P_X until P_Y returns the contract
   acs          ACS query time for growing numbers of active contracts
+
+The DAR goes to every participant in ids.json: on b1-xyz P_Z also hosts
+BANK_C, and a party's package must be vetted on all of its participants.
 
 Every contract carries a fresh probe id, and all of them are archived at the
 end (unless --keep), so reruns do not see each other's contracts.
@@ -221,6 +224,8 @@ class Probe:
             Participant("P_X", api["P_X"]),
             Participant("P_Y", api["P_Y"]),
         )
+        # Only for the DAR upload; the checks run on P_X and P_Y.
+        self.every = [Participant(name, url) for name, url in api.items()]
         self.A, self.B, self.C = (
             ids["parties"][k] for k in ("BANK_A", "BANK_B", "BANK_C")
         )
@@ -302,9 +307,9 @@ class Probe:
 
     # -- steps -----------------------------------------------------------
     def upload(self) -> None:
-        print("== upload DAR to P_X and P_Y")
+        print("== upload DAR to " + ", ".join(p.name for p in self.every))
         raw = DAR.read_bytes()
-        for p in (self.px, self.py):
+        for p in self.every:
             r = p.request(
                 "POST",
                 "/v2/dars?vetAllPackages=true",
@@ -433,7 +438,7 @@ class Probe:
         r = px.submit([C], [self.note(C, [], "s2")], self.cid("s2"))
         self.check(
             "s2",
-            "P_X submits for BANK_C (hosted only on P_Y)",
+            "P_X submits for BANK_C (not hosted on P_X)",
             "rejected",
             r.status != 200,
             r.brief(),

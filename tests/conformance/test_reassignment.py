@@ -1,4 +1,9 @@
 import unittest
+import hashlib
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 from checks import ROOT, CheckError, EvidenceMissing, read_json, reassignment_check
 from runner import case_plan, prerequisites
@@ -40,6 +45,48 @@ def examples():
 
 
 class ReassignmentTests(unittest.TestCase):
+    def test_development_final_and_measurement_have_separate_prerequisites(self):
+        config = {"model": "B2"}
+        development = Namespace(final=False, prerequisite_batch=[])
+        self.assertEqual(prerequisites(development, config), [])
+        self.assertTrue(prerequisites(development, config, measurement=True))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            spec = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in (ROOT / "spec").glob("*.md")}
+            paths = []
+            for model in ("A", "B1"):
+                path = root / model
+                path.mkdir()
+                (path / "manifest.json").write_text(json.dumps({"scope": "conformance",
+                    "model": model, "source_sha256": spec}))
+                (path / "checks.json").write_text(json.dumps({"final_handoff_eligible": True, "runs": []}))
+                paths.append(str(path))
+            final = Namespace(final=True, prerequisite_batch=paths)
+            # The existing final_gate validates complete per-model evidence; test scheduling here.
+            with patch("runner.final_gate", return_value=[]):
+                self.assertTrue(prerequisites(Namespace(final=True, prerequisite_batch=paths[:1]), config))
+                self.assertEqual(prerequisites(final, config), [])
+                self.assertTrue(prerequisites(final, config, measurement=True))
+                measured = root / "T1"
+                measured.mkdir()
+                (measured / "manifest.json").write_text(json.dumps({"scope": "experiment", "source_sha256": spec}))
+                rows = [dict(model=model, suite="T1", run_id=f"{model}-{i}", warmup=i < 3, verdict="PASS")
+                        for model in ("A", "B1") for i in range(33)]
+                (measured / "checks.json").write_text(json.dumps({"runs": rows}))
+                final.prerequisite_batch = paths + [str(measured)]
+                with patch("report.run_values", return_value={"timing_valid": True}):
+                    self.assertEqual(prerequisites(final, config, measurement=True), [])
+                with patch("runner.final_gate", return_value=["missing raw evidence"]):
+                    self.assertTrue(prerequisites(final, config))
+                (root / "B1/checks.json").write_text(json.dumps({"final_handoff_eligible": False, "runs": []}))
+                self.assertTrue(prerequisites(final, config))
+                (root / "B1/checks.json").write_text(json.dumps({"final_handoff_eligible": True, "runs": []}))
+                stale = read_json(root / "B1/manifest.json")
+                stale["source_sha256"][next(iter(spec))] = "0" * 64
+                (root / "B1/manifest.json").write_text(json.dumps(stale))
+                self.assertTrue(prerequisites(final, config))
+
     def test_contract_intervals_not_summed_as_total(self):
         manifest, events = examples()
         result = reassignment_check(manifest, events, "run-b2", ["business-0", "business-1"])

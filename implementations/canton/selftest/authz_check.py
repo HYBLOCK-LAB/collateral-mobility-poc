@@ -3,7 +3,8 @@
 
     . scripts/env.sh && .venv/bin/python -I selftest/authz_check.py
 
-Two fresh run_ids, each prepared like selftest/xy_selftest.py (README §3).
+Three fresh run_ids, each prepared like selftest/xyz_selftest.py (README §3):
+right 0 and the agreements on P_X and P_Y, the margin call on P_Z.
 
 r1, the X→Y path:
   package     every contract of the run comes from the package named
@@ -24,6 +25,11 @@ r1, the X→Y path:
   loan tree   the loan transaction as BANK_A sees it on P_X: the Consume of
               right 1 with nextHolder BANK_C and the consumed copy, nothing
               else; BANK_B sees the whole transaction
+  solo S2     on P_Z: BANK_C alone locks right 2, locks it naming itself as
+              the locker, creates a margin call, creates an allocation
+  margin      ALLOCATE_MARGIN through the Z adapter: COMMITTED
+  S3 view     as at S0: right 2 LOCKED with the same signatories, the margin
+              call SATISFIED, the allocation signed by BANK_C and the CCP
 r2, a right cosigned by the borrower:
   forged      P_Y actAs [BANK_B, BANK_C] creates right 1 as the Repo would,
               but cosigned by BANK_C: the joint submission the PoC trusts,
@@ -32,6 +38,14 @@ r2, a right cosigned by the borrower:
               cosigned by the borrower"
   adapter     CONFIRM_LOAN through the Y adapter: not committed; the adapter
               answers 503 TEMPORARILY_UNAVAILABLE (README §3)
+r3, a right cosigned by the CCP:
+  forged      P_Z actAs [BANK_C, CCP] creates right 2 as the loan would, but
+              cosigned by the CCP: the joint submission the PoC trusts, which
+              succeeds
+  ledger      AllocateMargin with it, actAs [BANK_C]: fails with "the right is
+              cosigned by the CCP"
+  adapter     ALLOCATE_MARGIN through the Z adapter: REJECTED with
+              PRECONDITION_NOT_MET (no loan created the right), nothing changes
 
 The report goes to implementations/canton/logs/authz-check/<batch>.json,
 without credentials. Exit status 0 when every expectation held, 1 otherwise.
@@ -52,12 +66,14 @@ from pathlib import Path
 SELFTEST_DIR = Path(__file__).resolve().parent
 IMPL_DIR = SELFTEST_DIR.parent
 sys.path.insert(0, str(SELFTEST_DIR))
-from xy_selftest import STATE_WAIT, Failed, XYSelftest, http  # noqa: E402
+from xy_selftest import STATE_WAIT, Failed, http  # noqa: E402
+from xyz_selftest import MARGIN_CALL, XYZSelftest  # noqa: E402
 
 PACKAGE = "collateral"
 PKG_DIR = IMPL_DIR / "daml/collateral"
 RIGHT = "Collateral.Right:UseRight"
 LOAN_AGREEMENT = "Collateral.Agreement:LoanAgreement"
+ALLOCATION = "Collateral.Margin:Allocation"
 WILDCARD = [
     {
         "identifierFilter": {
@@ -74,6 +90,9 @@ VIEWS = {
     "BANK_B@P_X": ("P_X", ("BANK_B",)),
     "BANK_B@P_Y": ("P_Y", ("BANK_B",)),
     "BANK_C@P_Y": ("P_Y", ("BANK_C",)),
+    "P_Z": ("P_Z", ("BANK_C", "CCP")),
+    "BANK_C@P_Z": ("P_Z", ("BANK_C",)),
+    "CCP@P_Z": ("P_Z", ("CCP",)),
 }
 # Signatories by contract (README §3); rights are (holder, cosigner).
 STAKEHOLDERS = {
@@ -88,11 +107,14 @@ STAKEHOLDERS = {
     "TradeContract loan-001": ("BANK_B", "BANK_C"),
     "Obligation loan-001:securities-return": ("BANK_C", "BANK_B"),
     "Obligation loan-001:collateral-return": ("BANK_B", "BANK_C"),
+    "MarginCall margin-001": ("BANK_C", "CCP"),
+    "Allocation allocation-001": ("BANK_C", "CCP"),
 }
 S0 = {
     "UseRight right:0 AVAILABLE",
     "RepoAgreement repo-agreement-001",
     "LoanAgreement loan-agreement-001",
+    "MarginCall margin-001 OPEN",
 }
 S1 = (S0 - {"UseRight right:0 AVAILABLE"}) | {
     "UseRight right:0 CONSUMED",
@@ -107,6 +129,11 @@ S2 = (S1 - {"UseRight right:1 AVAILABLE"}) | {
     "TradeContract loan-001",
     "Obligation loan-001:securities-return",
     "Obligation loan-001:collateral-return",
+}
+S3 = (S2 - {"UseRight right:2 AVAILABLE", "MarginCall margin-001 OPEN"}) | {
+    "UseRight right:2 LOCKED",
+    "MarginCall margin-001 SATISFIED",
+    "Allocation allocation-001",
 }
 # Ledger refusals by kind: the Canton error code and text the cause must
 # contain, case ignored (Canton 3.7.3 with Daml 3.7.1: an ensure clause or an
@@ -132,6 +159,10 @@ def label(event: dict) -> str | None:
         return f"TradeContract {a['tradeId']}"
     if entity == "Obligation":
         return f"Obligation {a['obligationId']}"
+    if entity == "MarginCall":
+        return f"MarginCall {a['marginCallId']} {a['status']}"
+    if entity == "Allocation":
+        return f"Allocation {a['allocationId']}"
     return None
 
 
@@ -161,7 +192,7 @@ def dar_package() -> tuple[str, str]:
     return version[1], main[1]
 
 
-class AuthzCheck(XYSelftest):
+class AuthzCheck(XYZSelftest):
     def __init__(self, run_id: str, package_id: str):
         super().__init__()
         self.run_id = run_id
@@ -169,6 +200,7 @@ class AuthzCheck(XYSelftest):
         self.names = {party: name for name, party in self.parties.items()}
         self.attempt = 0
         self.right1_cid: str | None = None
+        self.right2_cid: str | None = None
 
     # --- ledger reads ----------------------------------------------------
 
@@ -206,7 +238,7 @@ class AuthzCheck(XYSelftest):
 
     def contract_ids(self) -> dict[str, list[str]]:
         """The run's contract IDs on each participant, to show nothing changed."""
-        return {p: sorted(self.acs(p, VIEWS[p][1])) for p in ("P_X", "P_Y")}
+        return {p: sorted(self.acs(p, VIEWS[p][1])) for p in ("P_X", "P_Y", "P_Z")}
 
     def find(self, view: str, name: str) -> str:
         found = [cid for cid, e in self.acs(*VIEWS[view]).items() if label(e) == name]
@@ -273,8 +305,8 @@ class AuthzCheck(XYSelftest):
         return {"http": status, "code": code, "cause": cause[:400]}
 
     def right_arguments(self, version: int, holder: str, cosigner: str) -> dict:
-        """A right of the run as the Repo creates it at version 1 (README §3),
-        or the initial right at version 0."""
+        """A right of the run as the Repo creates it at version 1 and the loan
+        at version 2 (README §3), or the initial right at version 0."""
         bundle = self.fixture["bundles"][0]
         bundle_id = bundle["bundle_id"]
         return {
@@ -290,11 +322,46 @@ class AuthzCheck(XYSelftest):
             "cosigner": self.parties[cosigner],
             "createdVersion": str(version),
             "status": "AVAILABLE",
-            "allowedCommands": ["CONFIRM_LOAN"] if version else ["CONFIRM_REPO"],
+            "allowedCommands": [
+                ("CONFIRM_REPO", "CONFIRM_LOAN", "ALLOCATE_MARGIN")[version]
+            ],
             "predecessorRightId": f"{bundle_id}:right:{version - 1}"
             if version
             else None,
-            "sourceRecordId": self.repo["payload"]["repo_id"] if version else None,
+            "sourceRecordId": (
+                None,
+                self.repo["payload"]["repo_id"],
+                self.loan["payload"]["loan_id"],
+            )[version],
+        }
+
+    def margin_call_arguments(self) -> dict:
+        call = self.fixture["margin_calls"][0]
+        return {
+            "runId": self.run_id,
+            "marginCallId": call["margin_call_id"],
+            "bundleId": call["bundle_id"],
+            "provider": self.parties[call["provider"]],
+            "ccp": self.parties[call["ccp"]],
+            "wholeBundleAccepted": call["whole_bundle_accepted"],
+            "eligibilityPassed": call["eligibility_passed"],
+            "status": call["status"],
+        }
+
+    def allocation_arguments(self) -> dict:
+        payload = self.margin["payload"]
+        return {
+            "runId": self.run_id,
+            "allocationId": payload["allocation_id"],
+            "marginCallId": payload["margin_call_id"],
+            "bundleId": self.margin["bundle_id"],
+            "provider": self.parties["BANK_C"],
+            "ccp": self.parties["CCP"],
+            "rightId": self.margin["bundle_id"] + ":right:2",
+            "requestId": self.margin["request_id"],
+            "actor": self.parties["BANK_C"],
+            "versionBefore": "2",
+            "versionAfter": "3",
         }
 
     # --- checks ----------------------------------------------------------
@@ -439,6 +506,7 @@ class AuthzCheck(XYSelftest):
         bank_b = self.parties["BANK_B"]
         bank_c = self.parties["BANK_C"]
         bank_a = self.parties["BANK_A"]
+        ccp = self.parties["CCP"]
         return [
             ("prepare", self.prepare),
             ("package", lambda: self.until(self.package)),
@@ -531,12 +599,67 @@ class AuthzCheck(XYSelftest):
             ),
             ("s2-view", lambda: self.until(lambda: self.view(S2))),
             ("s2-loan-transaction-tree", lambda: self.until(self.loan_tree)),
+            ("s2-right-2", self.find_right2),
+            (
+                "s2-bank-c-locks-right-2-alone",
+                lambda: self.refused(
+                    "P_Z",
+                    ("BANK_C",),
+                    self.exercise(self.right2(), "Lock", {"locker": ccp}),
+                    AUTHORIZATION,
+                ),
+            ),
+            (
+                "s2-locker-is-holder",
+                lambda: self.refused(
+                    "P_Z",
+                    ("BANK_C",),
+                    self.exercise(self.right2(), "Lock", {"locker": bank_c}),
+                    failure("the locker is the holder"),
+                ),
+            ),
+            (
+                "s2-bank-c-creates-margin-call-alone",
+                lambda: self.refused(
+                    "P_Z",
+                    ("BANK_C",),
+                    self.create(self.margin_call_arguments(), MARGIN_CALL),
+                    AUTHORIZATION,
+                ),
+            ),
+            (
+                "s2-bank-c-creates-allocation-alone",
+                lambda: self.refused(
+                    "P_Z",
+                    ("BANK_C",),
+                    self.create(self.allocation_arguments(), ALLOCATION),
+                    AUTHORIZATION,
+                ),
+            ),
+            (
+                "allocate-margin-Z",
+                lambda: self.confirm_ok(
+                    "Z", "bank-c", "BANK_C", self.margin, "AUTHZ-MARGIN"
+                ),
+            ),
+            ("s3-view", lambda: self.until(lambda: self.view(S3))),
         ]
 
     def right1(self) -> str:
         if self.right1_cid is None:
             raise Failed("right 1 not found yet")
         return self.right1_cid
+
+    def right2(self) -> str:
+        if self.right2_cid is None:
+            raise Failed("right 2 not found yet")
+        return self.right2_cid
+
+    def find_right2(self):
+        self.right2_cid = self.until(
+            lambda: self.find("BANK_C@P_Z", "UseRight right:2 AVAILABLE")
+        )
+        return {"contract_id": self.right2_cid}
 
     def find_right1(self):
         self.right1_cid = self.until(
@@ -608,6 +731,65 @@ class AuthzCheck(XYSelftest):
             ("adapter-confirm-loan-not-committed", adapter_confirm),
         ]
 
+    def r3_steps(self):
+        forged = {}
+
+        def create_forged():
+            status, reply = self.ledger_submit(
+                "P_Z",
+                ("BANK_C", "CCP"),
+                self.create(self.right_arguments(2, "BANK_C", "CCP")),
+            )
+            if status != 200:
+                raise Failed(f"joint create: HTTP {status} {str(reply)[:400]}")
+            forged["cid"] = self.until(
+                lambda: self.find("BANK_C@P_Z", "UseRight right:2 AVAILABLE")
+            )
+            return {"contract_id": forged["cid"], "holder": "BANK_C", "cosigner": "CCP"}
+
+        def ledger_allocate():
+            call = self.until(
+                lambda: self.find("BANK_C@P_Z", "MarginCall margin-001 OPEN")
+            )
+            argument = {
+                "requestId": f"authz-{self.run_id}-ledger",
+                "allocationId": self.margin["payload"]["allocation_id"],
+                "expectedVersion": "2",
+                "rightCid": forged["cid"],
+            }
+            return self.refused(
+                "P_Z",
+                ("BANK_C",),
+                self.exercise(call, "AllocateMargin", argument, MARGIN_CALL),
+                failure("the right is cosigned by the CCP"),
+            )
+
+        def adapter_allocate():
+            before = self.contract_ids()
+            status, body = self.adapter(
+                "POST",
+                "Z",
+                "/commands",
+                "bank-c",
+                command=self.margin,
+                test_id="AUTHZ-FORGED-Z",
+            )
+            outcome = body.get("outcome") if isinstance(body, dict) else None
+            code = (body.get("error") or {}).get("code") if isinstance(body, dict) else None
+            if (status, outcome, code) != (200, "REJECTED", "PRECONDITION_NOT_MET"):
+                raise Failed(f"HTTP {status} {body}; expected REJECTED PRECONDITION_NOT_MET")
+            after = self.contract_ids()
+            if after != before:
+                raise Failed(f"the run's contracts changed: {before} -> {after}")
+            return {"http": status, "body": body}
+
+        return [
+            ("prepare", self.prepare),
+            ("forged-right-2-created-jointly", create_forged),
+            ("ledger-allocate-margin-refused", ledger_allocate),
+            ("adapter-allocate-margin-not-committed", adapter_allocate),
+        ]
+
     def execute(self, steps) -> dict:
         for name, fn in steps:
             if not self.step(name, fn):
@@ -624,7 +806,11 @@ def main() -> int:
     version, package_id = dar_package()
     batch = secrets.token_hex(4)
     runs = []
-    for suffix, steps in (("r1", AuthzCheck.r1_steps), ("r2", AuthzCheck.r2_steps)):
+    for suffix, steps in (
+        ("r1", AuthzCheck.r1_steps),
+        ("r2", AuthzCheck.r2_steps),
+        ("r3", AuthzCheck.r3_steps),
+    ):
         check = AuthzCheck(f"authz-{batch}-{suffix}", package_id)
         runs.append(check.execute(steps(check)))
     ids = json.loads((Path(os.environ["CANTON_STATE_DIR"]) / "ids.json").read_text())

@@ -11,6 +11,14 @@
     "bank-c": "POC_BANK_C_TOKEN",
     "experiment-observer": "POC_OBSERVER_TOKEN"
   },
-  "prepare_command": [".venv/bin/python", "implementations/db-api/prepare.py", "xyz"],
+  "prepare_command": [
+    ".venv/bin/python",
+    "implementations/db-api/readiness_evidence.py",
+    "prepare",
+    "http://127.0.0.1:8103",
+    "/run/secrets/model_a_readiness_evidence",
+    "implementations/db-api/prepare.py",
+    "xyz"
+  ],
   "evidence_dir": "implementations/db-api/logs"
 }
