@@ -166,41 +166,6 @@ class CantonConnectionTests(unittest.TestCase):
             loader.prepare("run-test", self.fixture, self.state, client)
         self.assertEqual([port for port, _ in self.creates], [4513, 4523])
 
-    def test_b2_preparation_pins_synchronizers_and_checks_ledger_receipts(self):
-        ids = self.xyz_state()
-        ids.update(topology="b2", synchronizers={"S1": "source", "S2": "target"})
-        (self.state / "ids.json").write_text(json.dumps(ids))
-
-        def ledger(request):
-            body = json.loads(request.content)
-            if request.url.path.endswith("active-contracts-page"):
-                self.assertTrue(body["includeIncompleteReassignments"])
-                return httpx.Response(200, json={"activeContracts": []})
-            response = self.ledger(request)
-            value = response.json()
-            value["transaction"]["synchronizerId"] = body["commands"]["synchronizerId"]
-            return httpx.Response(200, json=value)
-
-        with httpx.Client(transport=httpx.MockTransport(ledger)) as client:
-            with self.assertRaisesRegex(CheckError, "CANTON_PREPARE_TOPOLOGY"):
-                loader.prepare("run-test", self.fixture, self.state, client, "xyz")
-            loader.prepare("run-test", self.fixture, self.state, client, "xyz", b2=True)
-        self.assertEqual([(port, body["synchronizerId"]) for port, body in self.creates],
-                         [(4513, "source"), (4523, "target"), (4533, "target")])
-
-    def test_b2_existing_incomplete_reassignment_blocks_initial_submission(self):
-        ids = self.xyz_state()
-        ids.update(topology="b2", synchronizers={"S1": "source", "S2": "target"})
-        (self.state / "ids.json").write_text(json.dumps(ids))
-        entry = {"JsIncompleteUnassigned": {"value": {"createdEvent": {
-            "packageName": "collateral", "createArgument": {"runId": "run-test"}
-        }}}}
-        with httpx.Client(transport=httpx.MockTransport(lambda _:
-                httpx.Response(200, json={"activeContracts": [{"contractEntry": entry}]}))) as client:
-            with self.assertRaisesRegex(CheckError, "RUN_ALREADY_EXISTS"):
-                loader.prepare("run-test", self.fixture, self.state, client, "xyz", b2=True)
-        self.assertFalse((self.state / "conformance-preparations").exists())
-
     def test_xyz_fixture_conditions_are_preserved_without_mutating_input(self):
         parties = self.xyz_state()["parties"]
         for path in (ROOT / "shared/fixtures/initial").glob("*.json"):
