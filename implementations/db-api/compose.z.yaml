@@ -1,0 +1,55 @@
+# Use with compose.yaml in a separate X/Y/Z test project.
+services:
+  api-y:
+    environment:
+      MODEL_A_YZ_INTERNAL_TOKEN: "${MODEL_A_YZ_INTERNAL_TOKEN:?Set MODEL_A_YZ_INTERNAL_TOKEN}"
+    networks: [y, xy, yz]
+
+  api-z:
+    build: .
+    environment:
+      PLATFORM: Z
+      DB_HOST: db-z
+      DB_NAME: model_a_z
+      DB_USER: model_a_z
+      DB_PASSWORD: "${POSTGRES_Z_PASSWORD:?Set POSTGRES_Z_PASSWORD}"
+      POC_BANK_A_TOKEN: "${POC_BANK_A_TOKEN:?Set POC_BANK_A_TOKEN}"
+      POC_BANK_B_TOKEN: "${POC_BANK_B_TOKEN:?Set POC_BANK_B_TOKEN}"
+      POC_BANK_C_TOKEN: "${POC_BANK_C_TOKEN:?Set POC_BANK_C_TOKEN}"
+      POC_OBSERVER_TOKEN: "${POC_OBSERVER_TOKEN:?Set POC_OBSERVER_TOKEN}"
+      MODEL_A_YZ_INTERNAL_TOKEN: "${MODEL_A_YZ_INTERNAL_TOKEN:?Set MODEL_A_YZ_INTERNAL_TOKEN}"
+    volumes:
+      - ../../shared/schemas:/app/schemas:ro
+    ports:
+      - "127.0.0.1:${MODEL_A_Z_PORT:-8103}:8000"
+    networks: [z, yz]
+    depends_on:
+      db-z:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health/db', timeout=3).close()"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+
+  db-z:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: model_a_z
+      POSTGRES_USER: model_a_z
+      POSTGRES_PASSWORD: "${POSTGRES_Z_PASSWORD:?Set POSTGRES_Z_PASSWORD}"
+    networks: [z]
+    volumes:
+      - z-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+networks:
+  z:
+  yz:
+
+volumes:
+  z-data:

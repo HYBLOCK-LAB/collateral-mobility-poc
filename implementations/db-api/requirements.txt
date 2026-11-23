@@ -3,4 +3,5 @@ uvicorn==0.41.0
 SQLAlchemy==2.0.48
 psycopg[binary]==3.3.3
 httpx==0.28.1
+httpcore==1.0.9
 jsonschema==4.26.0

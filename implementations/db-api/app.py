@@ -18,9 +18,12 @@ from sqlalchemy import URL, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
 import storage as db
-from workflow import LOAN, REPO, Workflow, error, keys_for
+from allocation import AllocationWorkflow, lock_right, right_authority
+from workflow import LOAN, MARGIN, REPO, Workflow, error, keys_for
 
 platform = os.environ["PLATFORM"]
+command_type, submitting_actor = {"X": (REPO, "BANK_A"), "Y": (LOAN, "BANK_B"),
+                                  "Z": (MARGIN, "BANK_C")}[platform]
 database = os.environ["DB_NAME"]
 username = os.environ["DB_USER"]
 engine = create_engine(
@@ -43,13 +46,29 @@ tokens = {
         "bank-c": "POC_BANK_C_TOKEN", "experiment-observer": "POC_OBSERVER_TOKEN",
     }.items()
 }
-internal_token = os.environ["MODEL_A_INTERNAL_TOKEN"]
-if not all(tokens.values()) or not internal_token or len(set(tokens.values()) | {internal_token}) != 5:
-    raise ValueError("Configure five distinct nonempty API tokens")
-workflow = Workflow(engine, platform, os.getenv("MODEL_A_X_URL"), internal_token)
+internal_token = os.getenv("MODEL_A_INTERNAL_TOKEN") if platform != "Z" else None
+yz_token = os.getenv("MODEL_A_YZ_INTERNAL_TOKEN") if platform != "X" else None
+readiness_token_file = os.getenv("MODEL_A_READINESS_EVIDENCE_TOKEN_FILE") if platform == "Z" else None
+readiness_token = Path(readiness_token_file).read_text(encoding="utf-8").strip() if readiness_token_file else None
+credentials = [*tokens.values()]
+if platform != "Z":
+    credentials.append(internal_token)
+if platform == "Z" or yz_token:
+    credentials.append(yz_token)
+if readiness_token_file:
+    credentials.append(readiness_token)
+if not all(credentials) or len(set(credentials)) != len(credentials):
+    raise ValueError("Configure distinct nonempty API tokens")
+if platform == "Z":
+    readiness_event_engine = create_engine(
+        engine.url, pool_size=1, max_overflow=0, pool_timeout=1, pool_pre_ping=True,
+        connect_args={"connect_timeout": 3, "options": "-c lock_timeout=250 -c statement_timeout=1000"},
+    )
+    workflow = AllocationWorkflow(engine, os.getenv("MODEL_A_Y_URL"), yz_token, readiness_event_engine)
+else:
+    workflow = Workflow(engine, platform, os.getenv("MODEL_A_X_URL"), internal_token)
 schema_dir = Path(os.getenv("MODEL_A_SCHEMA_DIR", Path(__file__).parent / "schemas"))
 command_schema = Draft202012Validator(json.loads((schema_dir / "command.schema.json").read_text(encoding="utf-8")))
-command_type, submitting_actor = (REPO, "BANK_A") if platform == "X" else (LOAN, "BANK_B")
 identifier = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
@@ -68,12 +87,16 @@ async def recovery_loop(stopped):
 @asynccontextmanager
 async def lifespan(_app):
     await asyncio.to_thread(db.metadata.create_all, engine)
+    if platform == "Z":
+        workflow.readiness_writer.start()
     stopped = asyncio.Event()
     recovery = asyncio.create_task(recovery_loop(stopped))
     try:
         yield
     finally:
         stopped.set()
+        if platform == "Z":
+            await asyncio.to_thread(workflow.readiness_writer.close)
         await recovery
         workflow.peer.close()
         engine.dispose()
@@ -138,8 +161,9 @@ def authorize(connection, request, run_id, request_id=None, actor=None, observer
     return principal["actor"]
 
 
-def require_internal(request, run_id):
-    if not hmac.compare_digest(bearer(request), internal_token.encode("utf-8")):
+def require_internal(request, run_id, token=None):
+    token = token if token is not None else internal_token
+    if not token or not hmac.compare_digest(bearer(request), token.encode("utf-8")):
         raise ApiError("UNAUTHENTICATED", 401)
     if not valid_id(run_id):
         raise ApiError("INVALID_REQUEST", 400)
@@ -150,8 +174,11 @@ def validate_command(body, supported_type):
     if (not command_schema.is_valid(body) or body["command_type"] != supported_type
             or type(body["expected_version"]) is not int):
         raise ApiError("INVALID_REQUEST", 400, request_id)
-    record_id = body["payload"]["repo_id" if supported_type == REPO else "loan_id"]
-    longest_suffix = ":repurchase-payment" if supported_type == REPO else ":collateral-return"
+    id_field, longest_suffix = {
+        REPO: ("repo_id", ":repurchase-payment"), LOAN: ("loan_id", ":collateral-return"),
+        MARGIN: ("allocation_id", ""),
+    }[supported_type]
+    record_id = body["payload"][id_field]
     if not valid_id(db.right_id(body["bundle_id"], 2)) or not valid_id(record_id + longest_suffix):
         raise ApiError("INVALID_REQUEST", 400, request_id)
     return record_id
@@ -235,7 +262,13 @@ def snapshot(request: Request, run_id: str):
                  "type": row["kind"], "status": "OUTSTANDING", "agreement_id": agreement_ids[row["contract_id"]]}
                 for row in db.rows(connection, db.obligations, run_id=run_id)
             ],
-            "margin_calls": [], "allocations": [],
+            "margin_calls": ([{k: v for k, v in row.items() if k != "run_id"}
+                              for row in db.rows(connection, db.margin_calls, run_id=run_id)]
+                             if platform == "Z" else []),
+            "allocations": ([{**{k: v for k, v in row.items() if k != "run_id"},
+                               "provider": "BANK_C", "ccp": "CCP", "status": "LOCKED"}
+                             for row in db.rows(connection, db.allocations, run_id=run_id)]
+                            if platform == "Z" else []),
             "pending_operations": [{"request_id": row["request_id"], "bundle_id": row["bundle_id"],
                                     "kind": "PROCESSING", "blocks_use": True} for row in pending],
         }
@@ -312,6 +345,101 @@ if platform == "X":
         with engine.begin() as connection:
             workflow.message(connection, context, "MESSAGE_SENT", message_id, "X", "Y", "RESPONSE")
         return dict(answer, message_id=message_id)
+
+
+if platform == "Y" and yz_token:
+    @app.get("/internal/runs/{run_id}/ccp-rights/{bundle_id}")
+    def inspect_ccp_right(request: Request, run_id: str, bundle_id: str):
+        require_internal(request, run_id, yz_token)
+        if not valid_id(bundle_id):
+            raise ApiError("INVALID_REQUEST", 400)
+        with consistent_read() as connection:
+            if not db.require_run(connection, run_id):
+                raise ApiError("NOT_FOUND", 404)
+            version, block, _ = right_authority(connection, run_id, bundle_id)
+        return {"version": version, "block": block}
+
+    @app.post("/internal/runs/{run_id}/allocation-lock")
+    def apply_allocation_lock(request: Request, run_id: str, body: dict):
+        require_internal(request, run_id, yz_token)
+        command = body.get("command")
+        record = validate_command(command, MARGIN)
+        diagnostic = body.get("context")
+        if (not valid_id(body.get("message_id")) or not isinstance(diagnostic, dict)
+                or not all(valid_id(diagnostic.get(key)) for key in ("test_id", "attempt_id"))):
+            raise ApiError("INVALID_REQUEST", 400, command["request_id"])
+        context = {
+            "run_id": run_id, "request_id": command["request_id"], "bundle_id": command["bundle_id"],
+            "actor": "BANK_C", "command_type": MARGIN, "record_id": record,
+            "test_id": diagnostic["test_id"], "attempt_id": diagnostic["attempt_id"],
+        }
+        with engine.begin() as connection:
+            if db.one(connection, db.runs, lock=True, run_id=run_id) is None:
+                raise ApiError("NOT_FOUND", 404, command["request_id"])
+            workflow.message(connection, context, "MESSAGE_RECEIVED", body["message_id"], "Z", "Y", "REQUEST")
+            decision = lock_right(connection, workflow, context, command)
+        if decision is None:
+            raise ApiError("REQUEST_ID_CONFLICT", 409, command["request_id"])
+        message_id = uuid4().hex
+        with engine.begin() as connection:
+            workflow.message(connection, context, "MESSAGE_SENT", message_id, "Y", "Z", "RESPONSE")
+        return {"decision": decision, "message_id": message_id}
+
+
+if platform == "Z":
+    if readiness_token:
+        @app.post("/internal/runs/{run_id}/readiness-evidence/register")
+        def register_readiness_evidence(request: Request, run_id: str):
+            require_internal(request, run_id, readiness_token)
+            with consistent_read() as connection:
+                if db.require_run(connection, run_id):
+                    raise ApiError("REQUEST_ID_CONFLICT", 409)
+            if not workflow.readiness_writer.register(run_id):
+                raise ApiError("TEMPORARILY_UNAVAILABLE", 503)
+            return {"run_id": run_id, "status": "REGISTERED"}
+
+        @app.post("/internal/runs/{run_id}/readiness-evidence/seal")
+        def seal_readiness_evidence(request: Request, run_id: str):
+            require_internal(request, run_id, readiness_token)
+            return workflow.readiness_writer.seal(run_id)
+
+    @app.get("/runs/{run_id}/readiness")
+    def allocation_readiness(request: Request, run_id: str, bundle_id: str, margin_call_id: str, command_type: str):
+        if command_type != MARGIN or not all(map(valid_id, (run_id, bundle_id, margin_call_id))):
+            raise ApiError("INVALID_REQUEST", 400)
+        with consistent_read() as connection:
+            actor = authorize(connection, request, run_id, actor="BANK_C")
+            bundle, local_block = workflow.blocking_reason(connection, run_id, bundle_id, margin_call_id)
+        if bundle is None:
+            raise ApiError("NOT_FOUND", 404)
+        version = bundle["version"]
+        reasons = {local_block} if local_block else set()
+        if version < 3:
+            test_id = request.headers.get("X-Test-ID")
+            attempt_id = request.headers.get("X-Attempt-ID")
+            context = {
+                "run_id": run_id, "bundle_id": bundle_id, "actor": actor, "command_type": MARGIN,
+                "test_id": test_id if valid_id(test_id) else "MANUAL",
+                "attempt_id": attempt_id if valid_id(attempt_id) else uuid4().hex,
+            }
+            try:
+                response = workflow.query_y_readiness(context)
+                response.raise_for_status()
+                authority = response.json()
+                if type(authority["version"]) is not int or authority["version"] not in (0, 1, 2):
+                    raise ValueError("Invalid observed version")
+                block = authority["block"]
+                if block not in (None, "PRECONDITION_NOT_MET", "RIGHT_UNAVAILABLE", "USE_NOT_PERMITTED"):
+                    raise ValueError("Invalid authority status")
+                if block is None and authority["version"] != 2:
+                    raise ValueError("Confirmed loan is missing")
+                version = authority["version"]
+                if block:
+                    reasons.add(block)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                raise ApiError("TEMPORARILY_UNAVAILABLE", 503) from exc
+        return {"run_id": run_id, "platform": "Z", "bundle_id": bundle_id, "command_type": MARGIN,
+                "ready": not reasons, "observed_version": version, "blocking_reasons": sorted(reasons)}
 
 
 @app.get("/health/db")

@@ -2,5 +2,6 @@
 !app.py
 !storage.py
 !workflow.py
+!allocation.py
 !requirements.txt
 !Dockerfile

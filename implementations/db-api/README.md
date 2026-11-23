@@ -264,6 +264,102 @@ WSL 첫 초기화 시도에서는 권한 전환 후 `/dev/stdin` 비밀번호 �
 
 이전 자동 실행에서는 Docker 파이프 접근 오류와 HTTP 500이 발생했다. 이번에는 담당자가 기동한 환경에서 HTTP 점검과 권한 승인 후 Docker 런타임 검사를 수행했다.
 
-## 이후 단계와 인계
+## 4단계 Z 최소 흐름과 재현
 
-이번 결과는 **2단계 최소 흐름 개발 공유**다. 연구 총괄의 초기 적재와 이벤트 수집 연결 뒤 공통 실행기에서 X→Y 필수 항목을 검증한다. 총괄 검토와 사용자 승인에 따른 X→Y 기준 버전 보존을 마친 뒤 Z를 추가한다. 최종 인계에는 [공통 실행기](../../tests/conformance/README.md)의 AC-01~11 필수 변형·반복·증빙 통과가 필요하다.
+X→Y 비교 기준은 [Model A 기준 기록](../../tests/conformance/baselines/model-a-xy-20261122.md)의 main `83a4b5d`다. Z 작업은 이 기준 이후의 별도 브랜치에서 한다. 위 1~3단계 결과는 당시 검증 기록이다.
+
+`compose.yaml`은 X·Y 전용으로 계속 사용할 수 있다. 새 검증 프로젝트에서 `compose.z.yaml`을 함께 지정하면 독립 PostgreSQL `db-z`, API `api-z`, Z 전용 볼륨, Y↔Z 내부 네트워크가 추가된다. Z API 기본 주소는 `http://127.0.0.1:8103`이고 DB의 호스트 포트는 게시되지 않는다. 환경 변수 `POSTGRES_Z_PASSWORD`, `MODEL_A_YZ_INTERNAL_TOKEN`을 기존 환경과 별도로 제공한다. 직접 기동하면 Z의 `PLATFORM=Z`, 독립 DB 접속 설정 및 `MODEL_A_Y_URL`을 지정한다. Y와 Z의 내부 토큰은 같은 값으로 설정하고 기존 X↔Y 토큰과 은행·관측기 토큰과 구분한다.
+
+```powershell
+docker compose -p model-a-z-dev -f compose.yaml -f compose.z.yaml config --quiet
+docker compose -p model-a-z-dev -f compose.yaml -f compose.z.yaml up -d --build --wait
+```
+
+검증은 새 DB에서 진행한다. `metadata.create_all()`은 기존 DB에서 제약조건을 변경하지 않으므로, 이미 초기화된 X→Y 볼륨으로 Z 검증을 재현하려면 업그레이드 전에 별도 마이그레이션 계획이 필요하다.
+
+### 초기 데이터 및 연구 총괄 연결
+
+- 세 DB에 같은 새 `run_id`를 적재한다. Z에는 `runs` → `principals`·`bundles`(버전 0) → `margin_calls` 순으로 fixture를 매핑한다. 증거금 요구의 ID, 묶음, 제공자·CCP, 전체 묶음 수용과 적격성 플래그, OPEN 상태를 보존한다. 권리·배정·확정 거래는 초기 적재 대상에서 제외한다.
+- `margin_calls`는 실행과 묶음에 연결한다. `allocations`는 같은 실행의 해당 증거금 요구·묶음을 참조한다. 실행 내 묶음과 요구 각각의 중복 배정을 제약으로 막는다. Y의 `allocation_locks`는 요청별 잠금 또는 거부 결과를 보존하며, 성공한 잠금은 묶음당 한 건만 허용한다.
+- 총괄의 `prepare.py`·`collect_events.py`·공통 실행기 연결은 별도 연동 작업이다. XYZ 적재에는 Z DB의 `CONNECT`, 스키마 `USAGE`, `runs` SELECT와 위 네 적재 테이블 INSERT가 필요하다. XYZ 수집에는 Z용 별도 SELECT 자격, `runs`, `requests`, `transfers`, `commit_observations`, `events`의 읽기 권한과 공통 실행기의 수집기 자격 전달 범위 확장이 필요하다. X·Y 전용 실행은 Z에 의존하지 않도록 유지한다.
+
+### Z API, 확정과 복구
+
+- C은행 자격으로 Z에 `GET /runs/{run_id}/readiness`를 호출하고 `command_type=ALLOCATE_MARGIN`, `bundle_id`, `margin_call_id`를 지정한다. Z의 OPEN 요구와 Y의 현재 권리를 확인한다. readiness는 예약과 상태 변경을 수행하지 않는다.
+- `POST /runs/{run_id}/commands`에서 공통 배정 명령을 수락한다. Z가 요청을 영속화한 뒤 Y에 조건부 잠금을 요청한다. Y는 권위를 갖는 C은행 권리 `:right:2`를 잠그고 원래 요청에 대한 결과와 영속 확인 메시지를 함께 저장한다. Z는 이 확인을 받은 뒤 배정, 요구 SATISFIED, 버전 3, 최종 명령 결과를 같은 DB 트랜잭션에서 확정한다.
+- `GET /runs/{run_id}/commands/{request_id}`에서 원래 제출 기관이 저장된 결과를 조회한다. 같은 요청은 저장된 결정을 재사용하고, 다른 내용의 같은 ID는 충돌로 처리한다. Y 응답이 유실되면 Z는 PENDING을 유지하고 같은 요청으로 재개한다.
+- 관측기 snapshot에서 Y는 동일 권리 ID의 LOCKED와 기존 대차 의무, Z는 버전 3의 묶음·증거금 요구·배정을 반환한다. X의 Repo 계약과 의무를 유지한다. Y의 `RIGHT_LOCKED`와 영속 확인 송신, Z의 확인 수신과 `INTERNAL_COMMITTED`·`LOCAL_APPLIED`를 연결할 수 있다.
+
+### 기존 X·Y 변경 위치
+
+| 파일 | Z 추가에 따른 변경과 이유 |
+|---|---|
+| `app.py` | 플랫폼·명령·인증 분기에 Z를 추가했다. Y에 C은행 권리 조회와 잠금·결과 재전송용 내부 경로를 추가했다. 기존 X↔Y 업무 경로는 유지했다. |
+| `storage.py` | 버전 3과 C은행 권리 LOCKED를 저장할 수 있게 제약을 확장했다. 증거금 요구·배정·잠금 증거 테이블을 추가했다. |
+| `workflow.py`, `allocation.py` | 공통 결과의 ALLOCATION 매핑을 추가했다. Y의 조건부 잠금과 Z의 요청·확정·복구는 새 모듈에 둔다. |
+| `compose.z.yaml`, `Dockerfile`, `.dockerignore`, `env.example` | XYZ 검증용 구성과 새 모듈 패키징, Z의 환경 변수 이름을 연결했다. |
+
+### Model A 자체 검증 방법
+
+`selftest.py`의 기존 X·Y 모드는 새 F0 실행을 S2까지 확인한다. `--z`를 주면 Z readiness의 비변경성, S3 snapshot, 원래 결과 조회, 동일 요청 재전송을 확인한다. 일반 실행은 세 DB에 새 F0를 미리 적재한다. 격리된 자체 테스트에서만 X·Y에 적재한 새 `zdev-` 실행과 `MODEL_A_Z_TEST_DSN`을 준비하고 `--seed-z-test`를 지정해 Z의 F0 부분을 적재할 수 있다.
+
+```powershell
+python selftest.py <새-run_id> --x http://127.0.0.1:8101 --y http://127.0.0.1:8102
+python selftest.py <새-zdev-run_id> --x http://127.0.0.1:8101 --y http://127.0.0.1:8102 --z http://127.0.0.1:8103 --seed-z-test
+```
+
+### Z 최소 구현 실제 검증
+
+Windows Python API 세 개와 WSL에 새로 만든 독립 PostgreSQL 17.12 클러스터 세 개에서 실행했다. DB 포트는 `25432`~`25434`, API 포트는 `28201`~`28203`이었다. 기존 DB와 X→Y 증거는 보존했고, 시험 종료 후 새 시험 API와 DB만 종료했다.
+
+| 실행 ID | 결과 |
+|---|---|
+| `zdev-xy-4fee6b7d9` | PASS. 기존 X→Y API로 S0→S1→S2, Y readiness, 결과 조회 및 snapshot 검증 |
+| `zdev-xyz-a08b6f45b` | PASS. Z 시험용 F0 적재 후 S0→S3, Z readiness 비변경성, 원래 결과, 동일 요청 재전송, 단일 배정과 기존 계약·의무 보존 검증 |
+| `zdev-recovery-35e7b5740` | PASS. Y가 실제 잠금을 확정한 뒤 중계기에서 Z로의 응답을 차단했다. 응답 차단 중 Z는 PENDING과 미확정 배정을 유지했고, 차단 해제 후 같은 요청으로 단일 배정을 완료했다. 기존 X↔Y 토큰으로 Y↔Z 내부 조회 시 401도 확인했다. |
+
+세 환경의 `/health/db`, 공개 결과와 snapshot의 공통 Schema, DB 이벤트 Schema와 거래·권리 이력을 확인했다. 로컬 배치 `logs/z-minimum-6b2b9bb6d8/`의 `summary.json`과 `manifest.json`에 실행 ID·판정·업무 증거 해시가 있고, 실행별 snapshot·결과·이벤트 JSONL을 보존했다. Compose는 설정 검사만 실행했다. 실제 Compose 빌드·기동, 공통 XYZ 연결과 AC-01~11, 전체 X→Y 회귀 배치 및 Z의 전체 거절·경합·재시작 행렬은 아직 실행하지 않았다.
+
+### Z readiness 메시지 증거 수집 완료 확인
+
+XYZ 검증은 PR #10의 XYZ용 `prepare.py`·`collect_events.py`와 함께 실행한다.
+단일 Z API 프로세스가 준비부터 수집까지 같은 실행을 담당해야 한다.
+Z 시작 전에 `MODEL_A_READINESS_EVIDENCE_TOKEN_FILE`에 전용 임의 토큰 파일의 경로를 설정한다.
+Model A 래퍼에도 같은 파일을 읽기 전용으로 제공한다. API·DB 자격과 분리하고,
+파일 내용이나 비밀값을 인자·설정 JSON·증거에 기록하지 않는다.
+공통 수집 스크립트에는 기존 플랫폼별 읽기 전용 DSN만 넘긴다.
+
+XYZ 설정과 실행 명령에서 Z 제어 URL과 토큰 파일 경로를 실제 환경에 맞춘다.
+XYZ 단계 구분을 위해 적재기·수집기 경로와 마지막 `xyz`를 명령 인자에 유지한다.
+
+```json
+{
+  "prepare_command": [
+    "python", "implementations/db-api/readiness_evidence.py", "prepare",
+    "http://api-z:8000", "/run/secrets/model_a_readiness_evidence",
+    "implementations/db-api/prepare.py", "xyz"
+  ]
+}
+```
+
+```sh
+python tests/conformance/runner.py check --stage xyz --observer-auth bearer \
+  --config tests/conformance/config.a.xyz.local.json \
+  --collect-command python implementations/db-api/readiness_evidence.py collect \
+    http://api-z:8000 /run/secrets/model_a_readiness_evidence implementations/db-api/collect_events.py xyz
+```
+
+준비 래퍼는 DB에 없는 새 `run_id`를 Z에 등록한 후 기존 적재 명령을 실행한다.
+수집은 해당 run을 닫고 진행 중 조회, 큐, 쓰기 트랜잭션이 끝날 때까지 최대 4초의 확인 시간 예산으로 기다린다.
+작업자가 커밋한 이벤트 ID 집합을 기존 수집기가 PostgreSQL에서 내보낸 이벤트와 대조하고,
+같은 작업자·시계의 완료 상태를 다시 확인한 경우에만 요청된 JSONL 경로를 게시한다.
+수집 시점까지 정상 조회가 없었던 등록된 run은 빈 readiness 이벤트 집합을 가질 수 있다.
+장애나 실패로 중단된 실행은 기존 run을 재등록하지 않고 새 run으로 시작한다.
+
+큐 포화, 저장 실패, 종료·재시작으로 인한 미확인 상태, 확인 기한 초과는 종료 코드 1이다.
+유실을 소급해 채우지 않는다. 가능하면 별도 이름의 진단 JSONL과 종료 사유를 남기며,
+이미 게시된 결과를 덮어쓰지 않는다. 최종 JSONL 게시에는 결과 디렉터리의 하드 링크 지원이 필요하다.
+동일 run에 대한 명령과 readiness 호출은 수집 시작 전에 끝내고, 수집을 시작한 run을 다시 사용하지 않는다.
+기본 XY 실행은 기존 적재·수집 명령을 사용한다.
+
+최종 인계는 공통 XYZ 연결과 [공통 실행기](../../tests/conformance/README.md)의 AC-01~11 필수 변형·반복·증빙이 모두 갖춰진 뒤 진행한다.
