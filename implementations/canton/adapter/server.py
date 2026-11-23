@@ -916,9 +916,10 @@ class Adapter:
     ) -> Trail:
         """The trail of the state reads a runner GET makes (README §3): the
         GET's X-Test-ID and X-Attempt-ID and the fields its query names. A GET
-        without X-Test-ID logs nothing: the runner's initial-state snapshot
-        sends none, and a run's events may carry only its case's test ID or
-        PREPARE (tests/conformance/runner.py collect_history)."""
+        without X-Test-ID logs nothing, and a run's events may carry only its
+        case's test ID or PREPARE (tests/conformance/runner.py collect_history):
+        the runner's initial-state snapshot sends PREPARE and an attempt ID from
+        0b1ee43 on, and no X-Test-ID before."""
         if "X-Test-ID" not in request.headers:
             return Trail(run_id, "", {}, purpose)
         test_id, attempt = self.correlation(request)

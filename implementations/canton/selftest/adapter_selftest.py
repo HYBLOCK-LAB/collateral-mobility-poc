@@ -18,8 +18,10 @@ What it checks, over HTTP only:
              unprepared, logged as MESSAGE_SENT/RECEIVED under the POST's fields
              for every POST answered NOT_FOUND, and under the GET's X-Test-ID,
              X-Attempt-ID and query fields (result, readiness, snapshot) for
-             every GET answered NOT_FOUND after that read; each call answered;
-             no message for a refused call or for a GET without X-Test-ID
+             every GET answered NOT_FOUND after that read, the initial-state
+             snapshot of a runner from 0b1ee43 on (X-Test-ID PREPARE) included;
+             each call answered; no message for a refused call or for a GET
+             without X-Test-ID (that snapshot of an earlier runner)
   burst      concurrent POSTs to X and Y appending to the same events.jsonl
 
 Responses are judged with tests/conformance/checks.py (validate, check_result),
@@ -437,7 +439,22 @@ class Selftest:
                 echo=(self.run_id, None),
                 reads={"purpose": "snapshot"},
             )
-            # The runner's initial-state snapshot sends no X-Test-ID: no messages.
+            # The runner's initial-state snapshot: from 0b1ee43 on it sends
+            # X-Test-ID PREPARE and is logged under that test ID ...
+            self.refusal(
+                f"unknown-run-snapshot-prepare-{p}",
+                "GET",
+                p,
+                "/snapshot",
+                "observer",
+                status=404,
+                code="NOT_FOUND",
+                schema="snapshot.schema.json",
+                echo=(self.run_id, None),
+                test_id="PREPARE",
+                reads={"purpose": "snapshot"},
+            )
+            # ... and an earlier runner sends no X-Test-ID: no messages.
             self.refusal(
                 f"unknown-run-snapshot-no-test-id-{p}",
                 "GET",

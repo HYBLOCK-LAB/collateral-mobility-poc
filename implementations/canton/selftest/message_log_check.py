@@ -5,10 +5,11 @@
     .venv/bin/python -I selftest/message_log_check.py [--json OUT] [--allow-unlogged] <path> ...
 
 Each <path> is a file or a directory searched for events.jsonl (the adapters'
-evidence directory, CANTON_EVIDENCE_DIR or logs/, or one run folder of it) and
-for implementation-events.json (the copy the common runner keeps in each case
-folder of a batch). For each run it checks that the MESSAGE_SENT/MESSAGE_RECEIVED
-events
+evidence directory, CANTON_EVIDENCE_DIR or logs/, or one run folder of it), for
+implementation-events.json (the copy the common runner keeps in each case
+folder of a batch) and for the runner's records of its calls (call-*.json and
+snapshot-*.json, below). For each run it checks that the
+MESSAGE_SENT/MESSAGE_RECEIVED events
   schema       pass event.schema.json, as every other event of the run does (an
                event that does not is reported and left out of the checks below)
   ids          are <purpose>:<32 hex>[:p<n>]:req|res with a purpose of the
@@ -23,15 +24,16 @@ events
                no command events but the fields of their query: result the
                request and an institution, readiness the bundle, command type
                and an institution, snapshot none of them
-  context      in a batch case folder, each runner call (evidence/call-*.json)
-               has an attempt ID of its own; each call's attempt is one of those
-               calls on that platform: a submission or a command's read is the
-               POST of its request, a GET read is the GET it answers
-               (commands/<request_id>, readiness with its bundle and command
-               type, snapshot); and every runner GET the adapter answers after
-               reading (200, 202, 404) has a logged read, except a result
-               answered REJECTED, which may come from the rejection kept on disk,
-               and a 404 for a path or method the adapter does not serve
+  context      with the runner's records of the run, each record has an attempt
+               ID of its own; each call's attempt is one of those calls on that
+               platform: a submission or a command's read is the POST of its
+               request, a GET read is the GET it answers (commands/<request_id>,
+               readiness with its bundle and command type, snapshot), and a read
+               a snapshot file records carries that file's test ID; and every
+               runner GET the adapter answers after reading (200, 202, 404) has a
+               logged read, except a result answered REJECTED, which may come
+               from the rejection kept on disk, and a 404 for a path or method
+               the adapter does not serve
   order        each RECEIVED follows the SENT of its call on the same clock; a
                read's pages are numbered from 1 and page n+1 is sent only after
                page n was received, for the same attempt and purpose
@@ -39,6 +41,27 @@ events
                request (the adapter writes it from the confirmed response)
 and lists the calls whose response was not logged (an answer lost or not read
 whole, which the adapter's recovery handles: reported, not a failure).
+
+The runner's records of a run are in an evidence folder of a batch (a case's
+<case>/evidence, or a preparation batch's evidence): call-*.json for each call
+it made to a platform, and snapshot-<P>.json (P a platform of the adapter) for
+the initial-state snapshot GET of the preparation. A runner from 0b1ee43 on
+traces that GET in the file (test_id PREPARE, attempt_id, method GET, platform
+<P>, suffix snapshot) and an earlier one does not: a snapshot file without any
+of these fields is counted as untraced and is not a record; one with only some
+of them, with another method, platform or suffix, or without an integer
+status_code, is a problem. The records of a folder are checked with the run of
+the manifest.json above the folder in the implementation-events.json next to
+them, even when that file holds no event of the run; the other runs of the file
+are checked without records, and a folder without a manifest run_id with the
+file's one run. A folder without that file (a preparation batch, or a case that
+failed before the runner copied the adapter's events) is checked with the
+adapter's <evidence dir>/<run_id>/events.jsonl, when that file is among the
+paths, again even when it is empty (with each such file, when the paths hold
+more than one). A folder that cannot be paired this way is listed as not
+checked, which is not a failure, and only its records are checked. Every other
+event file is checked without records. A file or folder reached through more
+than one of the paths is read once.
 
 An event the order checks need but that is missing from the run (the adapter
 does not fail a call when writing its event fails) is reported as "not logged",
@@ -51,8 +74,11 @@ directory that also holds older runs).
 It prints, per run, the messages by category, purpose and kind, counting message
 IDs as tests/conformance/report.py counts N_message, then the spread of each
 count over the runs, the state reads (every purpose but submit) by the number
-of pages they read, and how many runner calls the context check matched.
---json writes the same counts and the problems to OUT.
+of pages they read, how many runner calls the context check matched (by the
+GET they answer, command for the rest, snapshot-file for the snapshot GETs that
+snapshot files record), the untraced snapshot files and the folders not
+checked. --json writes the same counts and the problems to OUT, the folders
+not checked under "(not checked)".
 Exit status 0 when every check held, 1 otherwise, 2 when a path is empty or
 missing or no run was found.
 """
@@ -98,6 +124,11 @@ assert set(QUERY_FIELDS) == set(QUERY_PURPOSES)
 READ_STATUSES = (200, 202, 404)
 # The 404 message of a path or method the adapter does not serve: no read.
 NO_SUCH_CALL = "no such call on platform "
+# The fields a traced snapshot file keeps of the GET that took it (runner.py
+# collect_snapshots, from 0b1ee43 on).
+SNAPSHOT_TRACE = ("test_id", "attempt_id", "method", "platform", "suffix")
+# The key under which a record keeps the name of its file (not a runner field).
+RECORD_FILE = "_file"
 
 
 class Checked(NamedTuple):
@@ -108,6 +139,18 @@ class Checked(NamedTuple):
     reads: Counter  # pages -> state reads (of any read purpose) of that many pages
     matched: Counter | None  # runner calls the context check matched, by kind;
     # None when no runner call records were given
+
+
+class Unit(NamedTuple):
+    """One run to check: its events in one event file, with the runner's records
+    paired with that file (None when none are)."""
+
+    run_id: str
+    path: Path  # the event file
+    events: list
+    records: list | None  # call_records of the paired evidence folder
+    untraced: int | None  # untraced snapshot files of that folder
+    folder: Path | None  # that folder
 
 
 def file_text(path: Path) -> str:
@@ -123,23 +166,62 @@ def file_text(path: Path) -> str:
     return body
 
 
-def runner_calls(path: Path) -> list | None:
-    """The runner's call records next to a batch's implementation-events.json,
-    or None for an adapter evidence file. A record that cannot be read is kept
-    as a problem string."""
-    if path.name != "implementation-events.json":
-        return None
-    calls: list = []
-    for record in sorted(path.parent.glob("call-*.json")):
+def call_records(folder: Path) -> tuple[list, int]:
+    """The runner's records of its calls in one evidence folder of a batch: each
+    call-*.json and each traced snapshot-<P>.json, with the number of snapshot
+    files that carry no trace. A file that cannot be read, or a snapshot file
+    traced in part or not as the snapshot GET of its platform, is kept as a
+    problem string."""
+    records: list = []
+    untraced = 0
+    snapshots = (folder / f"snapshot-{platform}.json" for platform in sorted(PLATFORMS))
+    files = sorted(folder.glob("call-*.json")) + [p for p in snapshots if p.exists()]
+    for path in files:
         try:
-            call = parse_json(record.read_text())
-            if not isinstance(call, dict):
+            record = parse_json(path.read_text())
+            if not isinstance(record, dict):
                 raise ValueError("not a JSON object")
         except (OSError, ValueError) as error:
-            calls.append(f"{record}: {error}")
+            records.append(f"{path}: {error}")
             continue
-        calls.append(call)
-    return calls
+        if path.name.startswith("snapshot-"):
+            if all(key not in record for key in SNAPSHOT_TRACE):
+                untraced += 1
+                continue
+            want = {
+                "method": "GET",
+                "platform": path.stem.removeprefix("snapshot-"),
+                "suffix": "snapshot",
+            }
+            wrong = [key for key, value in want.items() if record.get(key) != value]
+            wrong += [
+                key
+                for key in ("test_id", "attempt_id")
+                if not isinstance(record.get(key), str) or not record[key]
+            ]
+            status = record.get("status_code")
+            if not isinstance(status, int) or isinstance(status, bool):
+                wrong.append("status_code")
+            if wrong:
+                records.append(
+                    f"{path}: snapshot trace "
+                    + ", ".join(f"{key} {record.get(key)!r}" for key in wrong)
+                )
+                continue
+        record[RECORD_FILE] = path.name
+        records.append(record)
+    return records, untraced
+
+
+def folder_run_id(folder: Path) -> str | None:
+    """The run of an evidence folder of a batch: the run_id of the manifest.json
+    above it (a case folder's, or a preparation batch's)."""
+    try:
+        manifest = parse_json((folder.parent / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return None
+    run_id = manifest.get("run_id") if isinstance(manifest, dict) else None
+    return run_id if isinstance(run_id, str) and run_id else None
 
 
 def routed_away(body) -> bool:
@@ -187,16 +269,17 @@ def get_kind(call: dict) -> str | None:
     return suffix if suffix in ("readiness", "snapshot") else None
 
 
-def run_events(paths: list[Path]) -> dict[tuple[str, Path], list]:
-    """Every event of the given files, by (run_id, file). A file or a line that
-    cannot be read as an event is kept as a problem string, under
-    ("<unreadable>", file)."""
-    runs: dict[tuple[str, Path], list] = defaultdict(list)
+def run_events(paths: list[Path]) -> dict[Path, dict[str, list]]:
+    """Every event of the given files, by file and run_id (a file without events
+    has no run). A file or a line that cannot be read as an event is kept as a
+    problem string, under the run "<unreadable>"."""
+    files: dict[Path, dict[str, list]] = {}
     for path in paths:
+        runs = files.setdefault(path, defaultdict(list))
         try:
             text = file_text(path)
         except (OSError, ValueError) as error:  # CheckError is a ValueError
-            runs["<unreadable>", path].append(f"{path}: {error}")
+            runs["<unreadable>"].append(f"{path}: {error}")
             continue
         for number, line in enumerate(text.splitlines(), 1):
             if not line.strip():
@@ -206,17 +289,17 @@ def run_events(paths: list[Path]) -> dict[tuple[str, Path], list]:
                 if not isinstance(event, dict):
                     raise ValueError("not a JSON object")
             except ValueError as error:
-                runs["<unreadable>", path].append(f"{path}:{number}: {error}")
+                runs["<unreadable>"].append(f"{path}:{number}: {error}")
                 continue
-            runs[event.get("run_id", "<no run_id>"), path].append(event)
-    return runs
+            runs[event.get("run_id", "<no run_id>")].append(event)
+    return files
 
 
 def check_run(
     events: list, allow_unlogged: bool = False, calls: list | None = None
 ) -> Checked:
     """The checks above for the events of one run; the context check only
-    with the runner's call records of the run (runner_calls)."""
+    with the runner's records of the run (call_records)."""
     problems = [e for e in events if isinstance(e, str)]
     problems += [c for c in calls or () if isinstance(c, str)]
     by_attempt: dict = {}
@@ -353,9 +436,17 @@ def check_run(
                     f" {call.get('platform')} {call.get('suffix')}"
                     + (f" {asked}" if asked else "")
                 )
-            elif event["attempt_id"] not in context_seen:
-                context_seen.add(event["attempt_id"])
-                matched[get_kind(call) or "command"] += 1
+            else:
+                # The initial-state snapshot a snapshot file records (test PREPARE).
+                taken = call.get(RECORD_FILE, "").startswith("snapshot-")
+                if taken and event["test_id"] != call["test_id"]:
+                    problems.append(
+                        f"{where}: test {event['test_id']!r}, not the"
+                        f" {call['test_id']!r} of {call[RECORD_FILE]}"
+                    )
+                if event["attempt_id"] not in context_seen:
+                    context_seen.add(event["attempt_id"])
+                    matched["snapshot-file" if taken else get_kind(call) or "command"] += 1
         counts[event["message_category"], purpose, event["message_kind"]] += 1
         if request:
             sent[stem] = event
@@ -442,29 +533,86 @@ def main() -> int:
         help="pass runs that committed but logged no message (runs made before message logging)",
     )
     args = parser.parse_args()
+    given: dict[Path, Path] = {}  # each file or folder reached, as first reached
+
+    def first(path: Path) -> Path:
+        return given.setdefault(path.resolve(), path)
+
     files: list[Path] = []
+    folders: set[Path] = set()  # evidence folders holding runner records
     for name in args.paths:
         if not name:
             print("empty path (CANTON_EVIDENCE_DIR not set?)", file=sys.stderr)
             return 2
         path = Path(name)
         if path.is_file():
-            files.append(path)
+            files.append(first(path))
         elif path.is_dir():
-            files += sorted(path.rglob("events.jsonl"))
-            files += sorted(path.rglob("implementation-events.json"))
+            files += map(first, sorted(path.rglob("events.jsonl")))
+            files += map(first, sorted(path.rglob("implementation-events.json")))
+            for pattern in ("call-*.json", "snapshot-*.json"):
+                folders.update(first(record.parent) for record in path.rglob(pattern))
         else:
             print(f"{name}: no such file or directory", file=sys.stderr)
             return 2
-    runs = run_events(files)
-    if not runs:
+    events = run_events(list(dict.fromkeys(files)))
+    folders.update(
+        first(p.parent) for p in events if p.name == "implementation-events.json"
+    )
+    units: list[Unit] = []
+    unchecked: list[dict] = []  # folders of records without an event file to check
+    done: set[tuple[str, Path]] = set()
+    untraced = 0
+    for folder in sorted(folders):
+        records, untraced_here = call_records(folder)
+        untraced += untraced_here
+        run_id = folder_run_id(folder)
+        copy = first(folder / "implementation-events.json")
+        pairs: list[tuple[str, Path]] = []
+        reason = "no event file of the run among the paths"
+        if copy in events:
+            named = [run for run in events[copy] if not run.startswith("<")]
+            run = run_id or (named[0] if len(named) == 1 else None)
+            pairs = [(run, copy)] if run else []
+            reason = "no run_id above the folder, and not one run in its events"
+        elif run_id is not None:  # the adapter's <evidence dir>/<run_id>/events.jsonl
+            pairs = [
+                (run_id, path)
+                for path in events
+                if path.name == "events.jsonl" and path.parent.name == run_id
+            ]
+        if not pairs:
+            unchecked.append(
+                {
+                    "folder": str(folder),
+                    "run_id": run_id,
+                    "reason": reason,
+                    "runner_records": sum(isinstance(r, dict) for r in records),
+                    "untraced_snapshots": untraced_here,
+                    "problems": [r for r in records if isinstance(r, str)],
+                }
+            )
+            continue
+        for run, path in pairs:
+            found = events[path].get(run, [])
+            units.append(Unit(run, path, found, records, untraced_here, folder))
+            done.add((run, path))
+    for path, runs in events.items():
+        for run, found in runs.items():
+            if (run, path) not in done:
+                units.append(Unit(run, path, found, None, None, None))
+    if not units:
         print("no events.jsonl or implementation-events.json found", file=sys.stderr)
         return 2
-    seen_runs = Counter(run_id for run_id, _ in runs)
+    seen_runs = Counter(unit.run_id for unit in units)
+    seen_files = Counter((unit.run_id, unit.path) for unit in units)
     report, failed, unlogged = {}, 0, 0
-    for run_id, path in sorted(runs):
+    for unit in sorted(units, key=lambda u: (u.run_id, u.path, str(u.folder))):
+        run_id, path = unit.run_id, unit.path
         label = run_id if seen_runs[run_id] == 1 else f"{run_id} ({path})"
-        checked = check_run(runs[run_id, path], args.allow_unlogged, runner_calls(path))
+        if seen_files[run_id, path] > 1:  # one event file paired with several folders
+            label = f"{run_id} ({path}, records {unit.folder})"
+        checked = check_run(unit.events, args.allow_unlogged, unit.records)
         failed += bool(checked.problems)
         unlogged += bool(checked.unlogged)
         report[label] = {
@@ -476,6 +624,7 @@ def main() -> int:
             "runner_calls_matched": None
             if checked.matched is None
             else dict(sorted(checked.matched.items())),
+            "untraced_snapshots": unit.untraced,
         }
         line = " ".join(
             f"{purpose}/{kind[:3]}={n}"
@@ -494,6 +643,18 @@ def main() -> int:
             print(f"       {problem}")
         if len(checked.problems) > 20:
             print(f"       ... {len(checked.problems) - 20} more")
+    failed_folders = 0
+    for entry in unchecked:
+        failed_records = bool(entry["problems"])
+        failed_folders += failed_records
+        print(
+            f"{'FAIL' if failed_records else '----'} {entry['run_id'] or '<no run_id>':<44}"
+            f" not checked: {entry['reason']} ({entry['folder']})"
+        )
+        for problem in entry["problems"][:20]:
+            print(f"       {problem}")
+        if len(entry["problems"]) > 20:
+            print(f"       ... {len(entry['problems']) - 20} more")
     with_messages = [r for r in report.values() if r["messages"]]
     print(f"\n{len(report)} runs, {len(with_messages)} with messages, {failed} failed")
     if unlogged:
@@ -523,9 +684,19 @@ def main() -> int:
         )
     else:
         print("  runner calls matched: not checked (no call records)")
+    if untraced:
+        print(f"  snapshot files without a trace (a runner before 0b1ee43): {untraced}")
+    if unchecked:
+        print(
+            f"  evidence folders whose records were not checked against events: {len(unchecked)}"
+            + (f" ({failed_folders} with problems in the records)" if failed_folders else "")
+        )
     if args.json:
-        args.json.write_text(json.dumps(report, indent=1, ensure_ascii=False) + "\n")
-    return 1 if failed else 0
+        out: dict = dict(report)
+        if unchecked:
+            out["(not checked)"] = unchecked
+        args.json.write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
+    return 1 if failed or failed_folders else 0
 
 
 if __name__ == "__main__":
