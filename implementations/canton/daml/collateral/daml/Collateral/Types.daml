@@ -37,6 +37,10 @@ data RightStatus = AVAILABLE | CONSUMED | LOCKED
 data ContractType = REPO | LOAN
   deriving (Eq, Show)
 
+-- The margin call states (common.schema marginCall.status).
+data MarginCallStatus = OPEN | SATISFIED
+  deriving (Eq, Show)
+
 data ObligationType
   = REPO_REPURCHASE_PAYMENT
   | REPO_SECURITIES_RETURN

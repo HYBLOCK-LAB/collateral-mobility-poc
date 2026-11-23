@@ -99,10 +99,18 @@ def http(method: str, url: str, *, body=None, token: str | None = None, headers=
 
 
 class XYSelftest:
+    # A subclass (xyz_selftest) checks more platforms with the same steps.
+    name = "xy-selftest"
+    platforms = PLATFORMS
+    token_env = TOKEN_ENV
+    actors = {"bank-a": "BANK_A", "bank-b": "BANK_B"}
+    # readiness target per platform: command attribute, role, payload key
+    targets = {"Y": ("loan", "bank-b", "agreement_id")}
+
     def __init__(self):
         state = Path(os.environ.get("CANTON_STATE_DIR", ""))
         self.base = {}
-        for p in PLATFORMS:
+        for p in self.platforms:
             ready = state / f"adapter-{p}.ready"
             if not ready.is_file():
                 raise SystemExit(f"{ready} missing (scripts/adapter.sh start)")
@@ -110,11 +118,11 @@ class XYSelftest:
         ids = json.loads((state / "ids.json").read_text())
         self.parties = ids["parties"]
         self.ledger = ids["json_api"]
-        missing = [name for name in TOKEN_ENV.values() if not os.environ.get(name)]
+        missing = [name for name in self.token_env.values() if not os.environ.get(name)]
         if missing:
             raise SystemExit(f"{', '.join(missing)} not set (. scripts/env.sh)")
-        self.tokens = {role: os.environ[name] for role, name in TOKEN_ENV.items()}
-        self.run_id = "xy-selftest-" + secrets.token_hex(6)
+        self.tokens = {role: os.environ[name] for role, name in self.token_env.items()}
+        self.run_id = f"{self.name}-{secrets.token_hex(6)}"
         self.evidence = Path(os.environ.get("CANTON_EVIDENCE_DIR") or IMPL_DIR / "logs")
         self.fixture = read_json(ROOT / "shared/fixtures/initial/f0-normal.json")
         self.repo = read_json(ROOT / "shared/fixtures/commands/repo.json")
@@ -254,7 +262,7 @@ class XYSelftest:
 
     def snapshots(self) -> dict:
         found = {}
-        for p in PLATFORMS:
+        for p in self.platforms:
             status, body = self.adapter(
                 "GET", p, "/snapshot", "observer", test_id="XY-SNAPSHOT"
             )
@@ -269,7 +277,9 @@ class XYSelftest:
         while True:
             snapshots = self.snapshots()
             try:
-                state_check(snapshots, self.run_id, expected, self.previous, PLATFORMS)
+                state_check(
+                    snapshots, self.run_id, expected, self.previous, self.platforms
+                )
             except EvidenceMissing:
                 if time.monotonic() >= deadline:
                     raise
@@ -278,21 +288,25 @@ class XYSelftest:
             self.previous.append(expected)
             return snapshots
 
-    def readiness(self, expected_ready: bool, version, reasons: list[str]) -> dict:
+    def readiness(
+        self, expected_ready: bool, version, reasons: list[str], platform="Y"
+    ) -> dict:
+        attribute, role, key = self.targets[platform]
+        command = getattr(self, attribute)
         params = {
-            "command_type": self.loan["command_type"],
-            "bundle_id": self.loan["bundle_id"],
-            "agreement_id": self.loan["payload"]["agreement_id"],
+            "command_type": command["command_type"],
+            "bundle_id": command["bundle_id"],
+            key: command["payload"][key],
         }
         status, body = self.adapter(
-            "GET", "Y", "/readiness", "bank-b", params=params, test_id="XY-READINESS"
+            "GET", platform, "/readiness", role, params=params, test_id="XY-READINESS"
         )
         if status != 200 or not isinstance(body, dict) or "ready" not in body:
             raise Failed(f"readiness: HTTP {status} {body}")
         validate(body, "readiness.schema.json")
         identity = {
             "run_id": self.run_id,
-            "platform": "Y",
+            "platform": platform,
             "bundle_id": params["bundle_id"],
             "command_type": params["command_type"],
         }
@@ -304,12 +318,14 @@ class XYSelftest:
             raise Failed(f"readiness {got}, expected {wanted}")
         return body
 
-    def unchanged_readiness(self, expected_ready, version, reasons):
+    def unchanged_readiness(self, expected_ready, version, reasons, platform="Y"):
         """AC-02 shape: two readiness queries leave every snapshot unchanged."""
         before = self.snapshots()
-        bodies = [self.readiness(expected_ready, version, reasons) for _ in range(2)]
+        bodies = [
+            self.readiness(expected_ready, version, reasons, platform) for _ in range(2)
+        ]
         after = self.snapshots()
-        for p in PLATFORMS:
+        for p in self.platforms:
             strip = {k: v for k, v in before[p].items() if k != "snapshot_seq"}
             again = {k: v for k, v in after[p].items() if k != "snapshot_seq"}
             if canonical(strip) != canonical(again):
@@ -334,7 +350,7 @@ class XYSelftest:
             role,
             test_id="XY-RESULT",
         )
-        actor = {"bank-a": "BANK_A", "bank-b": "BANK_B"}[role]
+        actor = self.actors[role]
         check_result(body, self.run_id, command, actor, status)
         posted = self.committed[command["request_id"]][1]
         if status != 200 or body != posted:
@@ -365,14 +381,14 @@ class XYSelftest:
 
     # --- run -------------------------------------------------------------
 
-    def run(self) -> int:
-        steps = [
+    def steps(self) -> list:
+        return [
             ("prepare", self.prepare),
             (
                 "s0-initial-state",
                 lambda: (
                     initial_state(
-                        self.fixture, self.snapshots(), self.run_id, PLATFORMS
+                        self.fixture, self.snapshots(), self.run_id, self.platforms
                     )
                     or self.previous.append(expected_state(self.fixture, 0))
                 ),
@@ -400,6 +416,9 @@ class XYSelftest:
             ),
             ("events-history", self.events),
         ]
+
+    def run(self) -> int:
+        steps = self.steps()
         for name, fn in steps:
             if not self.step(name, fn):
                 break  # later steps depend on the earlier state
@@ -412,7 +431,7 @@ class XYSelftest:
             "passed": sum(r["ok"] for r in self.results),
             "planned": len(steps),
         }
-        out = IMPL_DIR / "logs/xy-selftest" / f"{self.run_id}.json"
+        out = IMPL_DIR / "logs" / self.name / f"{self.run_id}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
         for r in self.results:
