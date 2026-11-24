@@ -108,9 +108,11 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
                 path.write_text(json.dumps(config))
                 configs.append(str(path))
             args = Namespace(config=configs, output=temp, suite="T1", observer_auth="bearer",
-                             platforms=["X", "Y", "Z"], validation_batch=[], prerequisite_batch=[])
+                             platforms=["X", "Y", "Z"], validation_batch=[], prerequisite_batch=[],
+                             a_collect_command=["collector", "xyz"])
 
             async def execute(args, config, case, batch, index):
+                self.assertEqual(args.collect_command, ["collector", "xyz"] if config["model"] == "A" else None)
                 return dict(case, model=config["model"], run_id=f"self-test-{index}", path=f"run-{index}",
                             schedule_index=index, verdict="FAIL" if index == 0 else "PASS")
 
@@ -121,9 +123,13 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(run.await_count, 66)
             batch = next(root.glob("batch-*"))
             manifest = read_json(batch / "manifest.json")
+            self.assertEqual(manifest["a_collect_command"], ["collector", "xyz"])
             self.assertEqual([i["config_index"] for i in manifest["order"][:4]], [0, 1, 1, 0])
             self.assertEqual(sum(i["case"]["warmup"] for i in manifest["order"]), 6)
             self.assertEqual(read_json(batch / "checks.json")["not_run"], 0)
+            args.a_collect_command = None
+            with self.assertRaisesRegex(CheckError, "--a-collect-command"):
+                await experiment_batch(args)
 
     async def test_measurement_requires_real_current_validation(self):
         args = Namespace(validation_batch=[])
