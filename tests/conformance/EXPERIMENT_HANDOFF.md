@@ -89,7 +89,9 @@
 
 1. Git 상태·지침·인계 자료를 읽고 위 표와 미완료 연결을 확인한다.
 2. 필요한 연결 보완·검증을 완료하고 측정 기준과 환경을 기록한다.
-3. 현재 코드와 일치하는 모델별 `check --final` 근거를 확인하거나 다시 확보한다. A가 별도 수집기를 쓰면 README의 `--collect-command`도 필요하다.
+3. 실제 실험 환경과 같은 설정으로 모델별 `check --final` 근거를 확보한다. A의 check에는
+   `--collect-command`, experiment에는 같은 argv를 `--a-collect-command`로 전달한다.
+   아래 주소·토큰 파일 경로는 예시다. Compose에서는 확인된 읽기 전용 수집 컨테이너로 바꾼다.
 4. A·B1 T1, T2, T3를 구분해 수행한다. 필요한 B2 선행 근거를 보존한다.
 5. B2가 준비되고 최종 검증까지 통과하면 T4를 수행한다. B1 비교 조건이 유지됐는지 확인한다.
 6. 원본 기반 report 재생성·수치 대조 후 결과를 해석한다.
@@ -99,7 +101,10 @@
   --config tests/conformance/config.a.local.json tests/conformance/config.b1.local.json \
   --observer-auth bearer \
   --validation-batch results/ACTUAL_A_FINAL_BATCH \
-  --validation-batch results/ACTUAL_B1_FINAL_BATCH
+  --validation-batch results/ACTUAL_B1_FINAL_BATCH \
+  --a-collect-command .venv/bin/python implementations/db-api/readiness_evidence.py collect \
+    http://127.0.0.1:8103 /run/secrets/model_a_readiness_evidence \
+    implementations/db-api/collect_events.py xyz
 ```
 
 T2·T3는 위 명령의 `--suite`만 각각 바꾸되, 실제 수집 연결과 현재 검증 배치의 유효성을 먼저 확인한다. 반복 수를 낮추거나 실패 시도를 보충하는 옵션을 추가하지 않는다.

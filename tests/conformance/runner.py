@@ -1106,6 +1106,12 @@ async def experiment_batch(args):
         validate_config(config)
     if len({c["model"] for c in configs}) != len(configs):
         raise CheckError("duplicate model configs")
+    a_collector = getattr(args, "a_collect_command", None)
+    has_model_a = any(config["model"] == "A" for config in configs)
+    if has_model_a != bool(a_collector):
+        raise CheckError("--a-collect-command is required exactly when Model A is configured")
+    if a_collector:
+        check_helper_stage(a_collector, args.platforms)
     batch = Path(args.output).resolve() / ("batch-" + uuid.uuid4().hex)
     (batch / "evidence").mkdir(parents=True, exist_ok=False)
     plans = [experiment_plan(args.suite, c["model"]) for c in configs]
@@ -1119,6 +1125,7 @@ async def experiment_batch(args):
     # Freeze the attempted schedule; failures are never replenished.
     secrets = sorted({s for c in configs for s in secret_values(c)}, key=len, reverse=True)
     manifest = {"scope": "experiment", "suite": args.suite, "configs": configs,
+                "a_collect_command": a_collector,
                 "environment": environment_info(),
                 "order": order, "attempts": len(order), "spec_frozen": False,
                 "timing": {"http_seconds": HTTP_SECONDS, "observe_seconds": OBSERVE_SECONDS,
@@ -1140,6 +1147,7 @@ async def experiment_batch(args):
                 continue
             subargs = copy.copy(args)
             subargs.config = args.config[i]
+            subargs.collect_command = a_collector if config["model"] == "A" else None
             rows.append(await execute_case(subargs, config, item["case"], batch, index))
             append_run_events(batch, rows[-1])
             write_json(batch / "checks.json", {"scope": "experiment", "runs": rows,
@@ -1187,6 +1195,8 @@ def main():
     experiment.add_argument("--observer-auth", choices=("bearer",), required=True)
     experiment.add_argument("--prerequisite-batch", action="append", default=[])
     experiment.add_argument("--validation-batch", action="append", default=[])
+    experiment.add_argument("--a-collect-command", nargs="+",
+                            help="Model A evidence collector argv; the runner appends --run-id and --output")
     experiment.add_argument("--output", default=str(ROOT / "results"))
     report = commands.add_parser("report", help="Rebuild derived outputs without rerunning a model")
     report.add_argument("--batch", required=True)
@@ -1199,7 +1209,10 @@ def main():
         args.platforms = ["X", "Y", "Z"]
         try:
             return asyncio.run(experiment_batch(args))
-        except (CheckError, OSError, ValueError):
+        except CheckError as error:
+            print(str(redact(str(error), secret_values())), file=sys.stderr)
+            return 1
+        except (OSError, ValueError):
             print("Invalid experiment configuration or unavailable input", file=sys.stderr)
             return 1
     if args.command == "check":

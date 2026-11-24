@@ -354,10 +354,18 @@ X/Y 실행기 시험 후 Z 추가 전에 `results/development-baselines/xy-runne
   --config tests/conformance/config.a.local.json tests/conformance/config.b1.local.json \
   --observer-auth bearer \
   --validation-batch results/ACTUAL_A_FINAL_BATCH \
-  --validation-batch results/ACTUAL_B1_FINAL_BATCH
+  --validation-batch results/ACTUAL_B1_FINAL_BATCH \
+  --a-collect-command .venv/bin/python implementations/db-api/readiness_evidence.py collect \
+    http://127.0.0.1:8103 /run/secrets/model_a_readiness_evidence \
+    implementations/db-api/collect_events.py xyz
 
 .venv/bin/python tests/conformance/runner.py report --batch results/ACTUAL_EXPERIMENT_BATCH
 ```
+
+Model A를 포함하면 `--a-collect-command`에 최종 기능 검증 때 연결한 실제 수집 argv를
+지정한다. 위 주소와 파일 경로는 로컬 실행 예시다. Compose에서는 검증 때와 같은 읽기 전용
+수집 컨테이너·Z 제어 주소·토큰 파일 경로를 사용한다. 수집기는 A의 업무 본문 뒤에만
+동작하고, 실패하면 해당 사례를 증거 불완전으로 기록한다. Canton만 실행할 때는 이 옵션을 생략한다.
 
 대문자 배치 경로는 실제 실행에서 출력된 경로로 바꾼다. T2는 AC-08/09/10 각 10회, T3는 AC-11 5회다. T1은 모델마다 33회의 **계획된 시도**이며 실패 후 보충하지 않는다. 모델이 여러 개면 매 반복마다 실행 순서를 교대하고 한 번에 한 모델만 실행한다. 준비는 성능 측정 밖이다. T1 측정 흐름에는 확정→후속 readiness 사이에 검증용 snapshot 폴링을 끼우지 않는다.
 
