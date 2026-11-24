@@ -157,6 +157,17 @@ QUERY_PURPOSES = ("result", "readiness", "snapshot")
 # model. 4 s keeps the answer inside the common runner's 5 s HTTP timeout.
 RESPONSE_WAIT_ENV = "CANTON_RESPONSE_WAIT"
 RESPONSE_WAIT_DEFAULT = 4.0
+# The prefix of the variable that points a participant's calls at another
+# address, e.g. CANTON_LEDGER_URL_P_X (ledger_url).
+LEDGER_URL_ENV = "CANTON_LEDGER_URL_"
+# B2: the MESSAGE_SENT message_id of an unassign or assign call (Call.call_id),
+# and the contracts.json reference each call's completion event fills.
+CALL_MESSAGE = re.compile(r"(unassign|assign):[0-9a-f]{32}:req")
+EVIDENCE_OF = {"UNASSIGN": "unassigned_evidence", "ASSIGN": "assigned_evidence"}
+COMPLETION_OF = {
+    "UNASSIGN": ("UNASSIGNMENT_COMPLETED", "JsUnassignedEvent"),
+    "ASSIGN": ("ASSIGNMENT_COMPLETED", "JsAssignmentEvent"),
+}
 # When no right of the bundle is visible, the participant may not have applied
 # the preceding trade yet: read again for this long before PRECONDITION_NOT_MET.
 ABSENT_WAIT = 1.0
@@ -397,9 +408,17 @@ class Call:
     is sent and kept (without headers), the event_id of its MESSAGE_SENT once
     that is written, and the call it repeats, if any."""
 
-    def __init__(self, operation: str, contract_id: str, retry_of: str | None = None):
+    def __init__(
+        self,
+        operation: str,
+        contract_id: str,
+        retry_of: str | None = None,
+        stem: str | None = None,
+    ):
+        """A new call, or with stem one an earlier process or attempt sent
+        (Adapter.earlier_calls)."""
         self.operation, self.contract_id, self.retry_of = operation, contract_id, retry_of
-        self.stem = f"{operation.lower()}:{uuid.uuid4().hex}"
+        self.stem = stem or f"{operation.lower()}:{uuid.uuid4().hex}"
         self.request = b""
         self.sent: list[str] = []
 
@@ -506,6 +525,38 @@ def response_wait() -> float:
     if not (math.isfinite(value) and 0 < value <= 60):
         raise SystemExit(f"{RESPONSE_WAIT_ENV} must be seconds in (0, 60], got {raw!r}")
     return value
+
+
+def ledger_url(participant: str, bootstrapped: str) -> tuple[str, bool]:
+    """The participant JSON API this adapter calls, and whether it is not the
+    one the bootstrap recorded. LEDGER_URL_ENV<participant> points it
+    elsewhere, such as the self-test's fault relay in front of it (README §4);
+    the common runs leave it unset (an empty value is unset)."""
+    name = LEDGER_URL_ENV + participant
+    raw = os.environ.get(name) or None
+    if raw is None:
+        return bootstrapped, False
+    if not re.fullmatch(r"http://[A-Za-z0-9.-]+:[0-9]{1,5}", raw):
+        raise SystemExit(f"{name} must be http://<host>:<port>, got {raw!r}")
+    return raw, raw != bootstrapped
+
+
+def read_json(path: Path):
+    """A kept JSON file, or None when it is missing or not JSON."""
+    try:
+        return json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        return None
+
+
+def command_value(body, operation: str) -> dict:
+    """The command value of a kept unassign or assign request body."""
+    name = "UnassignCommand" if operation == "UNASSIGN" else "AssignCommand"
+    try:
+        value = body["reassignmentCommands"]["commands"][0]["command"][name]["value"]
+    except (KeyError, IndexError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def bundle_row(bundle: dict, version: int) -> dict:
@@ -678,7 +729,9 @@ class Adapter:
         if self.b2 and platform == "X":
             self.commands[REASSIGN] = "BANK_B"
         self.actors = set(self.commands.values())
-        self.ledger_url = ids["json_api"][self.spec["participant"]]
+        self.ledger_url, self.ledger_override = ledger_url(
+            self.spec["participant"], ids["json_api"][self.spec["participant"]]
+        )
         self.parties = ids["parties"]
         self.names = {party: name for name, party in self.parties.items()}
         # interface §13: a response counter per platform and run (this process).
@@ -899,7 +952,11 @@ class Adapter:
                 break
             query["pageToken"] = token
         # One contract is either assigned or in a reassignment; a contract the
-        # read saw both ways counts as assigned.
+        # read saw both ways counts as assigned. An active contract has an
+        # entry for each synchronizer it is active on, and an incomplete
+        # assigned entry does not say it is active on the target
+        # (state_service.proto), so an assigned contract is never left marked
+        # incomplete.
         for cid, (entity, argument, reassignment) in incomplete.items():
             if cid not in seen:
                 found[entity].append(
@@ -1805,9 +1862,11 @@ class Adapter:
         STARTED and is answered UNKNOWN: resending it goes on the same way. A
         request the ledger did not act on (not sent, or firmly refused while
         the contract stays on the source) is withdrawn and refused, as if never
-        accepted. Events are
-        logged as the ledger's answers show them; a step this process did
-        not see logs nothing."""
+        accepted. The STARTED record names the attempt that kept it
+        (started_by): when a resumed request commits, the calls and completion
+        events from that attempt on are recorded in contracts.json
+        (record_moved, earlier_calls). Events are logged as the ledger's
+        answers show them; a step this process did not see logs nothing."""
         run_id, role, request_id = key
         payload = command["payload"]
         source, target = payload["source_synchronizer"], payload["target_synchronizer"]
@@ -1823,7 +1882,14 @@ class Adapter:
             "target_synchronizer": target,
             **fields,
         }
-        unassign: tuple[Call, str | None] | None = None  # this process unassigned it
+        # This attempt's sent calls, each with the completion event it logged.
+        sent: list[tuple[Call, str | None]] = []
+        # The calls from the attempt that kept the request STARTED on are its
+        # calls (earlier_calls): a resumed request keeps that attempt.
+        since = fields.get("attempt_id")
+        if resumed:
+            since = (self.kept_of(run_id).get((role, request_id)) or {}).get("started_by")
+        reassignment: str | None = None
         tried = False
         while True:
             contract = self.whereabouts(found, key, cid)
@@ -1832,6 +1898,7 @@ class Adapter:
                 break
             if contract is not None and contract.synchronizer == target:
                 # Assigned by an earlier attempt of this request.
+                self.record_moved(key, cid, resumed, since, sent, None)
                 return self.reassigned(key, command, record, cid, replayed=resumed)
             verdict = self.judge_reassign(found, command, role)
             if verdict.code is not None:
@@ -1845,7 +1912,10 @@ class Adapter:
                 )
             tried, cid = True, verdict.right.cid
             self.ensure_selection(run_id, cid, verdict.right.arg["rightId"])
-            self.keep(key, {**record, "outcome": "STARTED", "contract_id": cid})
+            self.keep(
+                key,
+                {**record, "outcome": "STARTED", "contract_id": cid, "started_by": since},
+            )
             stamp = self.events.reserve()
             call = self.reassignment_call(
                 key,
@@ -1881,11 +1951,11 @@ class Adapter:
                 # Unassigned: the right cannot be used on the source any more,
                 # and not yet on the target (measurement.md §9).
                 self.note("SOURCE_UNUSABLE", run_id, test_id, **ids)
-                unassign = (
-                    call,
-                    self.note("UNASSIGNMENT_COMPLETED", run_id, test_id, **ids),
+                sent.append(
+                    (call, self.note("UNASSIGNMENT_COMPLETED", run_id, test_id, **ids))
                 )
                 break
+            sent.append((call, None))
             log.warning(
                 "%s %s: unassignment not confirmed: %s %s",
                 run_id,
@@ -1929,6 +1999,7 @@ class Adapter:
             return 503, self.unknown_of(key, command, resumed)
         event = self.reassignment_event(status, reply, "JsAssignmentEvent")
         if event is None or (event.get("createdEvent") or {}).get("contractId") != cid:
+            sent.append((call, None))
             log.warning(
                 "%s %s: assignment not confirmed: %s %s",
                 run_id,
@@ -1943,9 +2014,10 @@ class Adapter:
             )
             contract = self.whereabouts(found, key, cid)
             if contract is not None and contract.synchronizer == target:
+                self.record_moved(key, cid, resumed, since, sent, reassignment)
                 return self.reassigned(key, command, record, cid, replayed=resumed)
             return 503, self.unknown_of(key, command, resumed)
-        assigned = self.note("ASSIGNMENT_COMPLETED", run_id, test_id, **ids)
+        sent.append((call, self.note("ASSIGNMENT_COMPLETED", run_id, test_id, **ids)))
         version = int(command["expected_version"])
         self.note(
             "INTERNAL_COMMITTED",
@@ -1960,12 +2032,7 @@ class Adapter:
         )
         if await self.usable(Trail(run_id, test_id, fields, "usable-check"), cid, target):
             self.note("TARGET_USABLE", run_id, test_id, **ids)
-        try:
-            self.record_reassignment(run_id, cid, unassign, (call, assigned))
-        except Exception:
-            # Committed whatever happens to its evidence: a problem writing the
-            # manifest leaves the references out, it does not change the answer.
-            log.exception("%s %s: reassignment evidence not recorded", run_id, request_id)
+        self.record_moved(key, cid, resumed, since, sent, reassignment)
         return self.reassigned(key, command, record, cid, replayed=resumed)
 
     def reassigned(
@@ -2151,16 +2218,184 @@ class Adapter:
         }
         self.save(path, (json.dumps(manifest, indent=2) + "\n").encode())
 
+    def record_moved(
+        self,
+        key: tuple[str, str, str],
+        cid: str,
+        resumed: bool,
+        since: str | None,
+        sent: list[tuple[Call, str | None]],
+        reassignment: str | None,
+    ) -> None:
+        """Record a committed reassignment's calls and completion events in
+        contracts.json: this attempt's, and for a resumed request first those
+        of the attempts before it (earlier_calls). A call repeats the one
+        before it of the same operation (retry_of). Committed whatever happens
+        to its evidence: a problem recording it leaves the references out, it
+        does not change the answer."""
+        try:
+            calls: list[Call] = []
+            links: dict[str, tuple[Call, str]] = {}
+            if resumed:
+                calls, links = self.earlier_calls(key, cid, since, sent, reassignment)
+            for call, completed in sent:
+                if call.sent:
+                    calls.append(call)
+                if completed is not None:
+                    links[EVIDENCE_OF[call.operation]] = (call, completed)
+            last: dict[str, str] = {}
+            for call in calls:
+                call.retry_of = last.get(call.operation)
+                last[call.operation] = call.call_id
+            if calls or links:
+                self.record_reassignment(key[0], cid, calls, links)
+        except Exception:
+            log.exception("%s %s: reassignment evidence not recorded", key[0], key[2])
+
+    def earlier_calls(
+        self,
+        key: tuple[str, str, str],
+        cid: str,
+        since: str | None,
+        sent: list[tuple[Call, str | None]],
+        reassignment: str | None,
+    ) -> tuple[list[Call], dict[str, tuple[Call, str]]]:
+        """The calls earlier attempts of a resumed request sent, possibly in
+        an earlier process, read back from the run's events in the order they
+        were logged: each MESSAGE_SENT of this adapter for the request, from
+        the attempt that kept it STARTED on (since; all of them when the
+        record does not name it), whose request file is kept and is an
+        unassignment of the request's contract or an assignment of its
+        reassignment. Calls of an attempt withdrawn before that are not the
+        request's (README §3 B2).
+
+        A completion event of an earlier attempt (UNASSIGNMENT_COMPLETED,
+        ASSIGNMENT_COMPLETED) is linked to the one call whose kept response
+        shows it. What cannot be told apart is left out, and nothing is made
+        up for a call whose answer was lost: it has no completion event."""
+        run_id, role, request_id = key
+        root = self.events.root / run_id
+        mine = {call.call_id for call, _ in sent}
+        own = {completed for _, completed in sent if completed is not None}
+        known = {reassignment} if reassignment else set()
+        logged: list[Call] = []
+        done: dict[str, list[dict]] = {operation: [] for operation in COMPLETION_OF}
+        started = since is None
+        try:
+            lines = (root / "events.jsonl").read_text().splitlines()
+        except FileNotFoundError:
+            lines = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or (
+                event.get("run_id"),
+                event.get("request_id"),
+                event.get("actor"),
+            ) != (run_id, request_id, role):
+                continue
+            if not started:
+                if event.get("attempt_id") != since:
+                    continue
+                started = True
+            if event.get("producer_id") != self.events.producer:
+                continue
+            kind = event.get("event_type")
+            if event.get("contract_id") == cid and event.get("reassignment_id"):
+                known.add(event["reassignment_id"])
+                for operation, (completion, _) in COMPLETION_OF.items():
+                    if kind == completion and event.get("event_id") not in own:
+                        done[operation].append(event)
+            message = event.get("message_id")
+            if (
+                kind == "MESSAGE_SENT"
+                and event.get("message_kind") == "REQUEST"
+                and isinstance(message, str)
+                and CALL_MESSAGE.fullmatch(message)
+                and message not in mine
+                and event.get("event_id")
+            ):
+                stem = message.removesuffix(":req")
+                call = Call(stem.split(":", 1)[0].upper(), cid, stem=stem)
+                call.sent = [event["event_id"]]
+                logged.append(call)
+        if since is None:
+            log.warning(
+                "%s %s: the STARTED record names no attempt; calls of every "
+                "attempt are read",
+                run_id,
+                request_id,
+            )
+        elif not started:
+            log.warning(
+                "%s %s: attempt %s is not among the logged events; earlier "
+                "calls are left out",
+                run_id,
+                request_id,
+                since,
+            )
+        # An unassignment of the contract also names its reassignment in the
+        # response, when one was kept.
+        for call in logged:
+            value = self.shows(root, call, cid, None) if call.operation == "UNASSIGN" else None
+            if value and value.get("reassignmentId"):
+                known.add(value["reassignmentId"])
+        calls = []
+        for call in logged:
+            value = command_value(read_json(root / call.file("request")), call.operation)
+            if call.operation == "UNASSIGN" and value.get("contractId") == cid:
+                calls.append(call)
+            elif call.operation == "ASSIGN" and value.get("reassignmentId") in known:
+                calls.append(call)
+        links: dict[str, tuple[Call, str]] = {}
+        for operation, events in done.items():
+            if len(events) != 1:
+                continue
+            event = events[0]
+            shown = [
+                call
+                for call in calls
+                if call.operation == operation
+                and self.shows(root, call, cid, event["reassignment_id"])
+            ]
+            if len(shown) == 1:
+                links[EVIDENCE_OF[operation]] = (shown[0], event["event_id"])
+        return calls, links
+
+    def shows(
+        self, root: Path, call: Call, cid: str, reassignment: str | None
+    ) -> dict | None:
+        """The completion a kept response of the call shows for the contract
+        (of the reassignment, when given): the unassigned or assigned event."""
+        kind = COMPLETION_OF[call.operation][1]
+        value = self.reassignment_event(200, read_json(root / call.file("response")), kind)
+        if value is None:
+            return None
+        shown = value.get("contractId") if call.operation == "UNASSIGN" else (
+            (value.get("createdEvent") or {}).get("contractId")
+        )
+        if shown != cid:
+            return None
+        if reassignment is not None and value.get("reassignmentId") != reassignment:
+            return None
+        return value
+
     def record_reassignment(
         self,
         run_id: str,
         cid: str,
-        unassign: tuple[Call, str | None] | None,
-        assign: tuple[Call, str | None],
+        calls: list[Call],
+        links: dict[str, tuple[Call, str]],
     ) -> None:
         """Add a committed reassignment's calls and raw evidence to
-        contracts.json, leaving the selection as it was. A step this process
-        did not see, or whose event was not logged, adds no reference."""
+        contracts.json, leaving the selection as it was: for each completion
+        event the response it came with (links), and each call's request. A
+        call already listed stays as it is, so recording a request again (a
+        resend of a committed one) adds only what is new; so does an evidence
+        reference already recorded, and one that differs is logged and left
+        as it was. A step whose event was not logged adds no reference."""
         path = self.selection_path(run_id)
         manifest = json.loads(path.read_text())
         root = self.events.root / run_id
@@ -2170,20 +2405,33 @@ class Adapter:
         )
         if contract is None:
             raise ValueError(f"{cid} is not among the declared contracts")
-        for step, name in ((unassign, "unassigned_evidence"), (assign, "assigned_evidence")):
-            if step is None or step[1] is None:
+        for name in EVIDENCE_OF.values():
+            if name not in links:
                 continue
-            call, completed = step
+            call, completed = links[name]
             response = call.file("response")
+            kept = contract.get(name)
+            if kept:
+                if kept.get("event_id") != completed or kept.get("path") != response:
+                    log.warning(
+                        "%s %s: %s kept as %s, not %s",
+                        run_id,
+                        cid,
+                        name,
+                        kept.get("event_id"),
+                        completed,
+                    )
+                continue
             contract[name] = {
                 "event_id": completed,
                 "path": response,
                 "sha256": hashlib.sha256((root / response).read_bytes()).hexdigest(),
             }
-        for step in (unassign, assign):
-            if step is None or not step[0].sent:
+        listed = {c.get("call_id") for c in manifest["api_calls"]}
+        for call in calls:
+            if not call.sent or call.call_id in listed:
                 continue
-            call = step[0]
+            listed.add(call.call_id)
             request = call.file("request")
             manifest["api_calls"].append(
                 {
@@ -3115,6 +3363,7 @@ class Adapter:
                         "port": self.port,
                         "url": f"http://127.0.0.1:{self.port}",
                         "ledger": self.ledger_url,
+                        "ledger_override": self.ledger_override,
                         "producer_id": self.events.producer,
                         "clock_id": self.events.clock,
                         "warmup_ms": warmup_ms,
