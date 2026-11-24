@@ -182,6 +182,8 @@ class ZCase(Case, XYZSelftest):
     credential and the margin calls of the preparation."""
 
     roles = {"X": "bank-a", "Y": "bank-b", "Z": "bank-c"}
+    # The model the adapters' events carry (b2_stage3_selftest: B2).
+    model = MODEL
 
     def __init__(self, run_id: str, case: dict):
         super().__init__(run_id, case)
@@ -541,7 +543,7 @@ class ZCase(Case, XYZSelftest):
             validate(event, "event.schema.json")
             if (
                 event["run_id"] != self.run_id
-                or event["model"] != MODEL
+                or event["model"] != self.model
                 or event["test_id"] not in (self.test_id, "PREPARE")
             ):
                 raise CheckError("event identity mismatch")

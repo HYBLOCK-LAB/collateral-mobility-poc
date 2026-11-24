@@ -16,10 +16,17 @@ set -euo pipefail
 PGDATA="$CANTON_STATE_DIR/postgres"
 SECRETS="$CANTON_STATE_DIR/secrets"
 LOGDIR="$CANTON_STATE_DIR/logs"
-# One database per node (sequencer driver separate, as in Canton's HA example).
-NODE_DBS=(canton_s1_sequencer canton_s1_sequencer_driver canton_s1_mediator canton_px canton_py canton_pz)
-
 die() { echo "db.sh: $*" >&2; exit 1; }
+
+# One database per node (sequencer driver separate, as in Canton's HA example).
+# CANTON_TOPOLOGY=b2 adds the S2 sequencer, driver and mediator (canton/b2.conf).
+NODE_DBS=(canton_s1_sequencer canton_s1_sequencer_driver canton_s1_mediator canton_px canton_py canton_pz)
+S2_DBS=(canton_s2_sequencer canton_s2_sequencer_driver canton_s2_mediator)
+case "${CANTON_TOPOLOGY:-b1-xyz}" in
+  b1-xyz) ;;
+  b2) NODE_DBS+=("${S2_DBS[@]}") ;;
+  *) die "unknown CANTON_TOPOLOGY '${CANTON_TOPOLOGY}' (b1-xyz or b2)" ;;
+esac
 
 pg() { "$CANTON_PG_BIN/$1" "${@:2}"; }
 
@@ -101,7 +108,10 @@ cmd_wipe() {
   if pgrep -f -- "$CANTON_IMPL_DIR/adapter/server.py" >/dev/null; then
     die "an adapter is still running (scripts/adapter.sh stop)"
   fi
-  for db in "${NODE_DBS[@]}"; do
+  # Every topology's databases: wipe also removes ids.json, after which the
+  # state directory may be bootstrapped with the other topology, and S2 data
+  # left from b2 must not be found then.
+  for db in "${NODE_DBS[@]}" "${S2_DBS[@]}"; do
     psql_admin -d postgres -c "DROP DATABASE IF EXISTS $db WITH (FORCE)"
   done
   create_dbs

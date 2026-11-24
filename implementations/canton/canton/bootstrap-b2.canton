@@ -1,0 +1,134 @@
+// Bootstrap for b2.conf. Safe to rerun against persisted nodes: each step
+// checks the current state before changing it.
+//
+// Synchronizers: S1 (alias "s1") as in B1 and S2 (alias "s2"). P_X, P_Y and
+// P_Z connect to both.
+//
+// Institutions and hosting, the same on S1 and on S2 (every stakeholder of the
+// contracts used on S2 must be hosted there, and a contract can only be
+// reassigned between synchronizers that host all its stakeholders):
+//   BANK_A  P_X              platform X only
+//   BANK_B  P_X and P_Y      takes part in X and Y; submission rights on both
+//   BANK_C  P_Y and P_Z      takes part in Y and Z; submission rights on both
+//   CCP     P_Z              platform Z only
+//
+// The ledger must be new (README §4): additional hosting only works while the
+// party has no contracts, so scripts/canton.sh refuses a state directory whose
+// ids.json names another topology.
+//
+// Writes $CANTON_STATE_DIR/ids.json (synchronizer, participant and party ids)
+// and then $CANTON_STATE_DIR/canton.ready, which scripts/canton.sh waits for.
+
+import java.nio.file.{Files, Paths, StandardCopyOption}
+import com.digitalasset.canton.SynchronizerAlias
+import com.digitalasset.canton.console.{LocalParticipantReference, LocalSequencerReference, ParticipantReference}
+
+console.set_command_timeout(2.minutes)
+nodes.local.foreach(_.health.wait_for_running())
+
+val s1Alias = "s1"
+val s2Alias = "s2"
+if (!s1_sequencer.health.initialized()) {
+  bootstrap.synchronizer(
+    s1Alias,
+    sequencers = Seq(s1_sequencer),
+    mediators = Seq(s1_mediator),
+    synchronizerOwners = Seq(s1_sequencer),
+    synchronizerThreshold = PositiveInt.one,
+    staticSynchronizerParameters = StaticSynchronizerParameters.defaults(ProtocolVersion.forSynchronizer),
+  )
+}
+if (!s2_sequencer.health.initialized()) {
+  bootstrap.synchronizer(
+    s2Alias,
+    sequencers = Seq(s2_sequencer),
+    mediators = Seq(s2_mediator),
+    synchronizerOwners = Seq(s2_sequencer),
+    synchronizerThreshold = PositiveInt.one,
+    staticSynchronizerParameters = StaticSynchronizerParameters.defaults(ProtocolVersion.forSynchronizer),
+  )
+}
+
+val synchronizerSequencers: Seq[(String, LocalSequencerReference)] = Seq(s1Alias -> s1_sequencer, s2Alias -> s2_sequencer)
+Seq(p_x, p_y, p_z).foreach { p =>
+  synchronizerSequencers.foreach { case (alias, sequencer) =>
+    val registered = p.synchronizers.list_registered().exists(_._1.synchronizerAlias.unwrap == alias)
+    if (!registered) p.synchronizers.connect_local(sequencer, alias = alias)
+  }
+  p.synchronizers.reconnect_all()
+}
+val s1Id = p_x.synchronizers.id_of(s1Alias)
+val s2Id = p_x.synchronizers.id_of(s2Alias)
+val synchronizers = Seq(s1Alias -> s1Id, s2Alias -> s2Id)
+
+// A party is created on its first participant and enabled on each synchronizer
+// separately; the party id (name::participant namespace) is the same on both.
+def ensureParty(p: ParticipantReference, name: String): PartyId = {
+  val ids = synchronizers.map { case (alias, sId) =>
+    p.parties
+      .hosted(filterParty = name + "::", synchronizerIds = Set(sId))
+      .headOption
+      .map(_.party)
+      .getOrElse(p.parties.enable(name, synchronizer = Some(SynchronizerAlias.tryCreate(alias))))
+  }
+  require(ids.distinct.size == 1, s"$name has different party ids on S1 and S2: $ids")
+  ids.head
+}
+
+val bankA = ensureParty(p_x, "BANK_A")
+val bankB = ensureParty(p_x, "BANK_B")
+val bankC = ensureParty(p_y, "BANK_C")
+val ccp = ensureParty(p_z, "CCP")
+
+// Additional hosting, proposed in the S1 and in the S2 store. Both
+// participants must sign each mapping. This only works while the party has no
+// contracts.
+def ensureHosting(party: PartyId, from: ParticipantReference, to: ParticipantReference): Unit = {
+  val hosting = Set(party -> from.id, party -> to.id)
+  synchronizers.foreach { case (_, sId) =>
+    if (!to.topology.party_to_participant_mappings.are_known(sId, hosting)) {
+      Seq(from, to).foreach(
+        _.topology.party_to_participant_mappings.propose_delta(
+          party,
+          adds = List((to.id, ParticipantPermission.Submission)),
+          store = sId,
+        )
+      )
+    }
+    utils.retry_until_true {
+      Seq(from, to).forall(_.topology.party_to_participant_mappings.are_known(sId, hosting))
+    }
+  }
+}
+ensureHosting(bankB, p_x, p_y)
+ensureHosting(bankC, p_y, p_z)
+
+p_x.health.ping(p_y)
+p_y.health.ping(p_z)
+p_x.health.ping(p_z)
+
+val stateDir = Paths.get(sys.env("CANTON_STATE_DIR"))
+// JSON Ledger API addresses come from b2.conf, so the ports live in one place.
+def jsonApi(p: LocalParticipantReference): String = {
+  val http = p.config.httpLedgerApi
+  s"http://${http.address}:${http.port.unwrap}"
+}
+val ids =
+  s"""{
+     |  "topology": "b2",
+     |  "synchronizers": {"S1": "${s1Id.toProtoPrimitive}", "S2": "${s2Id.toProtoPrimitive}"},
+     |  "participants": {"P_X": "${p_x.id.toProtoPrimitive}", "P_Y": "${p_y.id.toProtoPrimitive}", "P_Z": "${p_z.id.toProtoPrimitive}"},
+     |  "parties": {
+     |    "BANK_A": "${bankA.toProtoPrimitive}",
+     |    "BANK_B": "${bankB.toProtoPrimitive}",
+     |    "BANK_C": "${bankC.toProtoPrimitive}",
+     |    "CCP": "${ccp.toProtoPrimitive}"
+     |  },
+     |  "json_api": {"P_X": "${jsonApi(p_x)}", "P_Y": "${jsonApi(p_y)}", "P_Z": "${jsonApi(p_z)}"}
+     |}
+     |""".stripMargin
+val tmp = stateDir.resolve("ids.json.tmp")
+Files.writeString(tmp, ids)
+Files.move(tmp, stateDir.resolve("ids.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+Files.writeString(stateDir.resolve("canton.ready"), java.time.Instant.now().toString + "\n")
+println("CANTON_B2_READY")

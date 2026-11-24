@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Canton process for B1 (S1, P_X, P_Y, P_Z; topology b1-xyz).
+# Canton process for B1 (S1, P_X, P_Y, P_Z; topology b1-xyz) or, with
+# CANTON_TOPOLOGY=b2 in .env, for B2 (S1, S2, P_X, P_Y, P_Z; topology b2).
 #
 #   canton.sh start     start the daemon and wait until bootstrap finished
 #   canton.sh stop      stop the daemon (SIGTERM, then wait)
@@ -13,27 +14,45 @@
 set -euo pipefail
 . "$(cd "$(dirname "$0")" && pwd)/env.sh"
 
-CONF="$CANTON_IMPL_DIR/canton/b1-xy.conf"
-BOOT="$CANTON_IMPL_DIR/canton/bootstrap-b1-xy.canton"
+die() { echo "canton.sh: $*" >&2; exit 1; }
+
+# The topology is chosen once per state directory; ids.json records it and the
+# start check below refuses a state directory bootstrapped with another one.
+TOPOLOGY="${CANTON_TOPOLOGY:-b1-xyz}"
+case "$TOPOLOGY" in
+  b1-xyz)
+    CONF="$CANTON_IMPL_DIR/canton/b1-xy.conf"
+    BOOT="$CANTON_IMPL_DIR/canton/bootstrap-b1-xy.canton"
+    ;;
+  b2)
+    CONF="$CANTON_IMPL_DIR/canton/b2.conf"
+    BOOT="$CANTON_IMPL_DIR/canton/bootstrap-b2.canton"
+    ;;
+  *) die "unknown CANTON_TOPOLOGY '$TOPOLOGY' (b1-xyz or b2)" ;;
+esac
 PIDFILE="$CANTON_STATE_DIR/canton.pid"
 READY="$CANTON_STATE_DIR/canton.ready"
-TOPOLOGY="b1-xyz"
 LOGDIR="$CANTON_STATE_DIR/logs"
 START_TIMEOUT="${CANTON_START_TIMEOUT:-300}"
 
-die() { echo "canton.sh: $*" >&2; exit 1; }
-
 # The java process itself is the source of truth (bin/canton execs java), so a
-# stale or wrong pid file cannot hide a running daemon.
+# stale or wrong pid file cannot hide a running daemon. Any topology's daemon
+# of this checkout counts: b1-xyz and b2 use the same S1 and participant ports,
+# and stop must find one started with the other topology.
 running_pid() {
   local pid
-  pid="$(pgrep -f -- "daemon -c $CONF" | head -n 1)"
+  pid="$(pgrep -f -- "daemon -c $CANTON_IMPL_DIR/canton/[^ ]*\.conf" | head -n 1)"
   [ -n "$pid" ] || return 1
   echo "$pid"
 }
 
 cmd_start() {
-  if pid="$(running_pid)"; then echo "canton.sh: already running (pid $pid)"; return; fi
+  if pid="$(running_pid)"; then
+    pgrep -f -- "daemon -c $CONF" | grep -qx "$pid" ||
+      die "a Canton daemon of this checkout runs with another topology than $TOPOLOGY (pid $pid); stop it first"
+    echo "canton.sh: already running (pid $pid)"
+    return
+  fi
   [ -x "$CANTON_HOME/bin/canton" ] || die "Canton $CANTON_VERSION not found at $CANTON_HOME (scripts/install-toolchain.sh)"
   [ -n "${CANTON_PG_PASSWORD:-}" ] || die "CANTON_PG_PASSWORD not set (scripts/db.sh init)"
   if [ -f "$CANTON_STATE_DIR/ids.json" ] &&
