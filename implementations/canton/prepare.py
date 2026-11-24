@@ -76,16 +76,26 @@ def call(client, url, body):
     return response.json()
 
 
-def existing_run(client, url, parties, run_id):
+def existing_run(client, url, parties, run_id, *, include_incomplete=False):
     query = {"eventFormat": {"filtersByParty": {
         party: {"cumulative": [{"identifierFilter": {"WildcardFilter": {
             "value": {"includeCreatedEventBlob": False}}}}]} for party in parties
     }, "verbose": False}, "maxPageSize": 200}
+    if include_incomplete:
+        query["includeIncompleteReassignments"] = True
     tokens = set()
     while True:
         page = call(client, url + "/v2/state/active-contracts-page", query)
         for entry in page["activeContracts"]:
-            event = entry["contractEntry"]["JsActiveContract"]["createdEvent"]
+            (kind, contract), = entry["contractEntry"].items()
+            if kind in ("JsIncompleteUnassigned", "JsIncompleteAssigned") and include_incomplete:
+                contract = contract.get("value", contract)
+                if kind == "JsIncompleteAssigned":
+                    contract = contract["assignedEvent"]
+                    contract = contract.get("value", contract)
+            elif kind != "JsActiveContract":
+                raise CheckError("unexpected Ledger API contract entry during preparation")
+            event = contract["createdEvent"]
             if event.get("packageName") == "collateral" and event["createArgument"].get("runId") == run_id:
                 return True
         token = page.get("nextPageToken")
@@ -97,11 +107,21 @@ def existing_run(client, url, parties, run_id):
         query["pageToken"] = token
 
 
-def prepare(run_id, fixture, state, client, stage="xy"):
+def prepare(run_id, fixture, state, client, stage="xy", *, b2=False):
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", run_id) or set(run_id) == {"."}:
         raise CheckError("invalid run_id")
     ids = read_json(state / "ids.json")
-    if stage == "xyz" and ids.get("topology") != "b1-xyz":
+    synchronizers = {}
+    if b2:
+        if stage != "xyz" or ids.get("topology") != "b2":
+            raise CheckError("B2 preparation requires xyz stage and b2 state")
+        s1, s2 = (ids.get("synchronizers", {}).get(alias) for alias in ("S1", "S2"))
+        if not all(isinstance(sid, str) and sid.strip() for sid in (s1, s2)) or s1 == s2:
+            raise CheckError("B2 preparation requires distinct S1 and S2 IDs")
+        synchronizers = {"P_X": s1, "P_Y": s2, "P_Z": s2}
+    elif ids.get("topology") == "b2":
+        raise CheckError("B2 state requires CANTON_PREPARE_TOPOLOGY=b2")
+    elif stage == "xyz" and ids.get("topology") != "b1-xyz":
         raise CheckError("XYZ preparation requires fresh b1-xyz state from PR #9")
     parties = ids["parties"]
     mapped = commands(run_id, fixture, parties, stage)
@@ -115,7 +135,7 @@ def prepare(run_id, fixture, state, client, stage="xy"):
         if (parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1", "::1")
                 or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path):
             raise CheckError("B1 preparation requires local unauthenticated JSON Ledger API URLs")
-        if existing_run(client, url, hosted[p], run_id):
+        if existing_run(client, url, hosted[p], run_id, include_incomplete=b2):
             raise CheckError("RUN_ALREADY_EXISTS")
     # LF 2.1 has no contract keys: persist an exclusive local claim before submitting.
     # A failed/uncertain submission keeps its claim; never reuse or clean up that run.
@@ -133,12 +153,17 @@ def prepare(run_id, fixture, state, client, stage="xy"):
     submitted = []
     try:
         for p, creates in mapped.items():
-            reply = call(client, urls[p] + "/v2/commands/submit-and-wait-for-transaction", {
-                "commands": {"commands": creates, "commandId": f"prepare-{run_id}-{p}",
-                             "userId": "conformance-prepare", "actAs": hosted[p]},
-            })
-            if not isinstance(reply.get("transaction"), dict):
+            submission = {"commands": creates, "commandId": f"prepare-{run_id}-{p}",
+                          "userId": "conformance-prepare", "actAs": hosted[p]}
+            if b2:
+                submission["synchronizerId"] = synchronizers[p]
+            reply = call(client, urls[p] + "/v2/commands/submit-and-wait-for-transaction",
+                         {"commands": submission})
+            transaction = reply.get("transaction")
+            if not isinstance(transaction, dict):
                 raise CheckError("Ledger API did not return the preparation transaction")
+            if b2 and transaction.get("synchronizerId") != synchronizers[p]:
+                raise CheckError("B2 preparation transaction on unexpected synchronizer")
             submitted.append(p)
         # Read-only runs emit no business events; initialize their real log without inventing any.
         evidence = Path(os.environ.get("CANTON_EVIDENCE_DIR") or ROOT / "implementations/canton/logs")
@@ -161,7 +186,8 @@ def main():
     try:
         state = Path(os.environ["CANTON_STATE_DIR"])
         with httpx.Client(timeout=30, trust_env=False) as client:
-            prepare(args.run_id, read_json(args.fixture), state, client, args.stage)
+            prepare(args.run_id, read_json(args.fixture), state, client, args.stage,
+                    b2=os.environ.get("CANTON_PREPARE_TOPOLOGY") == "b2")
     except Exception as error:
         reason = str(error) if isinstance(error, CheckError) else type(error).__name__
         print(json.dumps({"run_id": args.run_id, "status": "FAILED", "reason": reason}))
